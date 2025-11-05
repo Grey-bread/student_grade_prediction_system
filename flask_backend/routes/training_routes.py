@@ -12,7 +12,7 @@
 
 # -*- coding: utf-8 -*-
 from flask import Blueprint, request, jsonify
-from database import fetch_all, execute_query
+from database import fetch_all, execute_query, fetch_one
 from services.prediction import PredictionService
 import pandas as pd
 import traceback
@@ -187,6 +187,16 @@ def get_training_data_stats():
         """
         
         stats = fetch_all(stats_query)
+
+        # 学生总人数（来自学生表，新增学生应立即反映）
+        total_students_all = 0
+        try:
+            row = fetch_one("SELECT COUNT(*) AS total_students_all FROM students")
+            if row and 'total_students_all' in row:
+                total_students_all = int(row['total_students_all'] or 0)
+        except Exception:
+            # 如果 students 表不存在或查询失败，兜底为 0，避免接口报错
+            total_students_all = 0
         
         # 按学期统计
         semester_stats_query = """
@@ -204,10 +214,15 @@ def get_training_data_stats():
         
         semester_stats = fetch_all(semester_stats_query)
         
+        overall = stats[0] if stats else {}
+        # 增补 overall 字段：学生总人数（来自 students 表）
+        if isinstance(overall, dict):
+            overall['total_students_all'] = total_students_all
+
         return jsonify({
             'status': 'success',
             'data': {
-                'overall': stats[0] if stats else {},
+                'overall': overall,
                 'by_semester': semester_stats
             }
         }), 200

@@ -21,7 +21,7 @@
         </el-col>
         <el-col :span="6">
           <div class="stat-item">
-            <div class="stat-value">{{ dataStats.overall.total_students || 0 }}</div>
+            <div class="stat-value">{{ dataStats.overall.total_students_all || dataStats.overall.total_students || 0 }}</div>
             <div class="stat-label">学生数</div>
           </div>
         </el-col>

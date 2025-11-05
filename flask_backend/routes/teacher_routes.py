@@ -545,11 +545,23 @@ def dashboard_overview():
             cutoff = pd.Timestamp(datetime.now() - timedelta(days=90))
             recent_count = int((tmp['exam_date_parsed'] >= cutoff).sum())
 
+        # 学生总人数（来自 students 表，新增学生应立即反映）
+        total_students_all = None
+        try:
+            from database import fetch_one as _fetch_one
+            row = _fetch_one("SELECT COUNT(*) AS total_students_all FROM students")
+            if row and 'total_students_all' in row:
+                total_students_all = int(row['total_students_all'] or 0)
+        except Exception:
+            # 兜底：若查询失败，不影响其他指标
+            total_students_all = None
+
         return jsonify({
             'status': 'success',
             'data': {
                 'total_courses': len(courses),
                 'total_students': len(students),
+                'total_students_all': total_students_all,
                 'avg_score': round(avg_score, 2) if avg_score is not None else None,
                 'recent_exams': recent_count
             }

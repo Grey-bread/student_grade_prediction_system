@@ -2348,15 +2348,25 @@ def uploads_endpoint():
 
 @analysis_bp.route('/data-sources', methods=['GET', 'POST'])
 def data_sources_endpoint():
-    """GET: 列出数据源（优先数据库记录，若为空则基于真实表构造默认数据）; POST: 新增数据源。"""
+    """数据源列表与创建
+
+    GET:
+    - 默认仅返回已保存的数据源记录（避免一次性返回所有数据库表）
+    - 当 includeDefaults=1 时，若数据库为空，则基于真实表构造默认数据（不落库）
+    - 可选参数 onlySaved=1 强制仅返回已保存的数据
+    POST:
+    - 新增数据源记录
+    """
     try:
         ensure_management_tables()
 
         if request.method == 'GET':
+            only_saved = str(request.args.get('onlySaved', '')).lower() in ('1', 'true', 'yes')
+            include_defaults = str(request.args.get('includeDefaults', '')).lower() in ('1', 'true', 'yes')
             rows = fetch_all(
-                "SELECT id, name, type, active, last_collection, created_at FROM data_sources ORDER BY id DESC"
+                "SELECT id, name, type, config, active, last_collection, created_at FROM data_sources ORDER BY id DESC"
             ) or []
-            if not rows:
+            if not rows and include_defaults and not only_saved:
                 # 基于数据库真实表构造默认数据（不落库，仅返回）
                 tables = get_tables() or []
                 defaults = []
@@ -2376,6 +2386,7 @@ def data_sources_endpoint():
                     'id': r.get('id'),
                     'name': r.get('name'),
                     'type': r.get('type'),
+                    'config': r.get('config'),
                     'active': bool(r.get('active', 1)),
                     'lastCollection': str(r.get('last_collection')) if r.get('last_collection') else None
                 })
@@ -2399,6 +2410,40 @@ def data_sources_endpoint():
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
         return jsonify({'status': 'error', 'message': f'数据源处理失败: {str(e)}'}), 500
+
+
+@analysis_bp.route('/data-sources/<int:source_id>', methods=['PUT', 'PATCH', 'DELETE'])
+def data_source_detail(source_id: int):
+    """数据源详情：更新或删除
+    - PUT/PATCH: 更新 name/type/config/active
+    - DELETE: 删除记录
+    """
+    try:
+        ensure_management_tables()
+        if request.method == 'DELETE':
+            execute_query("DELETE FROM data_sources WHERE id=%s", [source_id])
+            return jsonify({'status': 'success', 'message': '已删除'}), 200
+
+        payload = request.get_json(silent=True) or {}
+        fields = []
+        values = []
+        for key in ('name', 'type', 'config', 'active', 'last_collection'):
+            if key in payload:
+                fields.append(f"{key}=%s")
+                # active 布尔转 0/1
+                val = payload[key]
+                if key == 'active':
+                    val = 1 if (val in (True, 1, '1', 'true', 'True')) else 0
+                values.append(val)
+        if not fields:
+            return jsonify({'status': 'error', 'message': '无可更新字段'}), 400
+        values.append(source_id)
+        sql = f"UPDATE data_sources SET {', '.join(fields)}, updated_at=NOW() WHERE id=%s"
+        execute_query(sql, values)
+        return jsonify({'status': 'success', 'message': '已更新'}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': f'更新数据源失败: {str(e)}'}), 500
 
 
 @analysis_bp.route('/collection-tasks', methods=['GET', 'POST'])
@@ -2438,11 +2483,65 @@ def collection_tasks_endpoint():
             "INSERT INTO collection_tasks (name, source_id, source_name, status, progress) VALUES (%s, %s, %s, %s, %s)",
             [name, source_id, source_name, 'running', 0]
         )
-        return jsonify({'status': 'success', 'message': '任务已创建'}), 201
+        # 简化：取最新一条记录的ID（在低并发场景下可接受）
+        try:
+            from database import fetch_one as _fetch_one
+            row = _fetch_one("SELECT id FROM collection_tasks ORDER BY id DESC LIMIT 1")
+            new_id = row and row.get('id')
+        except Exception:
+            new_id = None
+        return jsonify({'status': 'success', 'message': '任务已创建', 'data': {'id': new_id}}), 201
 
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
         return jsonify({'status': 'error', 'message': f'采集任务处理失败: {str(e)}'}), 500
+
+
+@analysis_bp.route('/collection-tasks/<int:task_id>', methods=['PATCH'])
+def update_collection_task(task_id: int):
+    """更新采集任务状态或进度。
+    支持字段：status(running/completed/failed/cancelled)、progress(0-100)
+    当状态更新为 completed 时，若任务关联了 source_id，则同步更新 data_sources.last_collection = NOW()
+    """
+    try:
+        ensure_management_tables()
+        payload = request.get_json(silent=True) or {}
+        status = payload.get('status')
+        progress = payload.get('progress')
+
+        sets = []
+        vals = []
+        if status:
+            sets.append("status=%s")
+            vals.append(status)
+        if progress is not None:
+            try:
+                p = max(0, min(100, int(progress)))
+            except Exception:
+                p = 0
+            sets.append("progress=%s")
+            vals.append(p)
+        if not sets:
+            return jsonify({'status': 'error', 'message': '无可更新字段'}), 400
+
+        vals.append(task_id)
+        execute_query(f"UPDATE collection_tasks SET {', '.join(sets)}, updated_at=NOW() WHERE id=%s", vals)
+
+        # 若完成，尝试更新数据源最后采集时间
+        if status == 'completed':
+            try:
+                from database import fetch_one as _fetch_one
+                row = _fetch_one("SELECT source_id FROM collection_tasks WHERE id=%s", (task_id,))
+                sid = row and row.get('source_id')
+                if sid:
+                    execute_query("UPDATE data_sources SET last_collection=NOW(), updated_at=NOW() WHERE id=%s", [sid])
+            except Exception:
+                pass
+
+        return jsonify({'status': 'success', 'message': '任务已更新'}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': f'更新任务失败: {str(e)}'}), 500
 
 
 @analysis_bp.route('/collection-tasks/<int:task_id>/cancel', methods=['POST'])

@@ -18,8 +18,8 @@
         </el-col>
         <el-col :span="6">
           <el-card shadow="hover" class="kpi-card">
-            <div class="kpi-title">覆盖学生数</div>
-            <div class="kpi-value">{{ overview.total_students ?? '—' }}</div>
+            <div class="kpi-title">学生总人数</div>
+            <div class="kpi-value">{{ overview.total_students_all ?? overview.total_students ?? '—' }}</div>
           </el-card>
         </el-col>
         <el-col :span="6">

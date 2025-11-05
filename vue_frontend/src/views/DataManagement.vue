@@ -183,6 +183,38 @@
         </span>
       </template>
     </el-dialog>
+
+    <!-- 编辑数据源对话框 -->
+    <el-dialog
+      v-model="editSourceVisible"
+      title="编辑数据源"
+      width="520px">
+      <el-form :model="editSource">
+        <el-form-item label="数据源名称">
+          <el-input v-model="editSource.name" />
+        </el-form-item>
+        <el-form-item label="数据源类型">
+          <el-select v-model="editSource.type" placeholder="请选择数据源类型">
+            <el-option label="API接口" value="api"></el-option>
+            <el-option label="数据库" value="database"></el-option>
+            <el-option label="文件系统" value="file_system"></el-option>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="配置信息">
+          <el-input type="textarea" v-model="editSource.config" />
+        </el-form-item>
+        <el-form-item>
+          <el-switch v-model="editSource.active" active-text="启用" inactive-text="禁用"></el-switch>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button type="danger" @click="deleteSource(editSource.id)" v-if="editSource.id">删除</el-button>
+          <el-button @click="editSourceVisible = false">取消</el-button>
+          <el-button type="primary" @click="saveEditSource">保存</el-button>
+        </span>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -214,7 +246,7 @@ export default {
       try {
         const [uploadsRes, sourcesRes, tasksRes] = await Promise.all([
           axios.get('/api/analysis/uploads'),
-          axios.get('/api/analysis/data-sources'),
+          axios.get('/api/analysis/data-sources', { params: { onlySaved: 1 } }),
           axios.get('/api/analysis/collection-tasks')
         ])
 
@@ -317,9 +349,41 @@ export default {
     }
     
     // 编辑数据源
+    const editSourceVisible = ref(false)
+    const editSource = reactive({ id: null, name: '', type: '', config: '', active: true, lastCollection: null })
     const editDataSource = (source) => {
-      console.log('编辑数据源:', source)
-      // 实际应用中这里会打开编辑对话框
+      editSource.id = source.id
+      editSource.name = source.name
+      editSource.type = source.type
+      editSource.config = source.config || ''
+      editSource.active = !!source.active
+      editSource.lastCollection = source.lastCollection || null
+      editSourceVisible.value = true
+    }
+    const saveEditSource = async () => {
+      try {
+        await axios.patch(`/api/analysis/data-sources/${editSource.id}` , {
+          name: editSource.name,
+          type: editSource.type,
+          config: editSource.config,
+          active: editSource.active
+        })
+        await loadData()
+        editSourceVisible.value = false
+      } catch (err) {
+        console.error('更新数据源失败: ', err)
+        alert('更新失败，请重试')
+      }
+    }
+    const deleteSource = async (id) => {
+      try {
+        await axios.delete(`/api/analysis/data-sources/${id}`)
+        await loadData()
+        editSourceVisible.value = false
+      } catch (err) {
+        console.error('删除数据源失败: ', err)
+        alert('删除失败，请重试')
+      }
     }
     
     // 提交新数据源
@@ -346,18 +410,20 @@ export default {
       const source = dataSources.value.find(s => s.id === sourceId)
       if (!source) return
 
+      let createdId = null
       try {
-        await axios.post('/api/analysis/collection-tasks', {
+        const resp = await axios.post('/api/analysis/collection-tasks', {
           source_id: source.id > 0 ? source.id : null,
           source_name: source.name,
           name: `${source.name}数据采集`
         })
+        createdId = resp?.data?.data?.id || null
       } catch (err) {
         console.error('创建采集任务失败: ', err)
       }
 
       // 本地创建一个运行中任务用于展示进度
-      const taskId = Date.now()
+      const taskId = createdId || Date.now()
       collectionTasks.value.unshift({
         id: taskId,
         name: `${source.name}数据采集`,
@@ -366,11 +432,11 @@ export default {
         progress: 0,
         createdAt: new Date().toLocaleString()
       })
-      simulateCollectionProgress(taskId)
+      simulateCollectionProgress(taskId, createdId, source.id)
     }
     
     // 模拟采集进度
-    const simulateCollectionProgress = (taskId) => {
+    const simulateCollectionProgress = (taskId, serverId, sourceId) => {
       const task = collectionTasks.value.find(t => t.id === taskId)
       if (!task) return
       
@@ -380,6 +446,9 @@ export default {
         if (progress >= 100) {
           progress = 100
           task.status = 'completed'
+          if (serverId) {
+            axios.patch(`/api/analysis/collection-tasks/${serverId}`, { status: 'completed', progress: 100 }).catch(()=>{})
+          }
           clearInterval(interval)
           
           // 更新数据源最后采集时间
@@ -391,6 +460,9 @@ export default {
           console.log('数据采集完成:', task.name)
         }
         task.progress = Math.floor(progress)
+        if (serverId) {
+          axios.patch(`/api/analysis/collection-tasks/${serverId}`, { progress: task.progress }).catch(()=>{})
+        }
       }, 500)
     }
     
@@ -447,6 +519,8 @@ export default {
       collectionTasks,
       addSourceVisible,
       newSource,
+      editSourceVisible,
+      editSource,
       sourceRules,
       handleFileChange,
       beforeUpload,
@@ -454,6 +528,8 @@ export default {
       viewFileDetails,
       showAddSourceDialog,
       editDataSource,
+      saveEditSource,
+      deleteSource,
       submitNewSource,
       collectData,
       cancelTask,
