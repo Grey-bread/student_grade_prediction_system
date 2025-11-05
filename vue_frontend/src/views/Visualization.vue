@@ -592,7 +592,7 @@ export default {
             },
             xAxis: {
               type: 'category',
-              data: response.data.labels || [],
+              data: response.data.labels || response.data.exams || [],
               boundaryGap: false
             },
             yAxis: {
@@ -600,7 +600,9 @@ export default {
               name: '分数'
             },
             series: (response.data.series || []).map(s => ({
-              ...s,
+              name: s?.name || '未知系列',
+              type: s?.type || 'line',
+              data: s?.data || [],
               smooth: true
             }))
           }
@@ -799,7 +801,7 @@ export default {
             },
             tooltip: {},
             legend: {
-              data: response.data.series.map(s => s.name),
+              data: (response.data.series || []).map(s => s?.name || '未知'),
               top: 30
             },
             radar: {
@@ -809,11 +811,11 @@ export default {
             },
             series: [{
               type: 'radar',
-              data: response.data.series.map(s => ({
-                value: s.value,
-                name: s.name,
+              data: (response.data.series || []).map(s => ({
+                value: s?.value || [],
+                name: s?.name || '未知',
                 areaStyle: {
-                  color: s.name.includes('班级') ? 'rgba(64, 158, 255, 0.3)' : 'rgba(255, 99, 132, 0.3)'
+                  color: (s?.name || '').includes('班级') ? 'rgba(64, 158, 255, 0.3)' : 'rgba(255, 99, 132, 0.3)'
                 }
               }))
             }]

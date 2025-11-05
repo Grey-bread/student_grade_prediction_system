@@ -527,7 +527,8 @@ def get_student_trends():
             if len(labels) > 10:
                 labels = labels[-10:]
                 for s in series:
-                    s['data'] = s['data'][-10:]
+                    if s and 'data' in s and isinstance(s['data'], list):
+                        s['data'] = s['data'][-10:]
             
             return jsonify({
                 'status': 'success',
@@ -1225,11 +1226,13 @@ def get_class_trends():
                 if len(exams) > 10:
                     exams = exams[-10:]
                     for s in series:
-                        s['data'] = s['data'][-10:]
+                        if s and 'data' in s and isinstance(s['data'], list):
+                            s['data'] = s['data'][-10:]
                 
                 return jsonify({
                     'status': 'success',
-                    'exams': exams,
+                    'labels': exams,
+                    'legend': [s.get('name', '') for s in series],
                     'series': series
                 }), 200
         except:
@@ -1239,7 +1242,8 @@ def get_class_trends():
         # 使用默认数据
         return jsonify({
             'status': 'success',
-            'exams': ['第一次月考', '期中考试', '第二次月考', '期末考试'],
+            'labels': ['第一次月考', '期中考试', '第二次月考', '期末考试'],
+            'legend': ['班级平均成绩'],
             'series': [
                 {
                     'name': '班级平均成绩',
@@ -1269,7 +1273,8 @@ def get_subject_comparison():
             # 返回默认数据
             return jsonify({
                 'status': 'success',
-                'subjects': ['语文', '数学', '英语', '物理', '化学'],
+                'labels': ['语文', '数学', '英语', '物理', '化学'],
+                'legend': ['平均分'],
                 'series': [
                     {
                         'name': '平均分',
@@ -1286,7 +1291,8 @@ def get_subject_comparison():
         if not numeric_columns:
             return jsonify({
                 'status': 'success',
-                'subjects': ['语文', '数学', '英语', '物理', '化学'],
+                'labels': ['语文', '数学', '英语', '物理', '化学'],
+                'legend': ['平均分'],
                 'series': [
                     {
                         'name': '平均分',
@@ -1346,7 +1352,8 @@ def get_subject_comparison():
         
         return jsonify({
             'status': 'success',
-            'subjects': subjects,
+            'labels': subjects,  # 统一使用 labels 字段
+            'legend': ['平均分'],
             'series': [
                 {
                     'name': '平均分',

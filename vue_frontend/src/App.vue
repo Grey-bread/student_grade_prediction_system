@@ -33,7 +33,7 @@
           </el-menu-item>
           <el-menu-item index="/visualization">
             <el-icon><PieChart /></el-icon>
-            <span>可视化</span>
+            <span>可视化表</span>
           </el-menu-item>
           <el-menu-item index="/student-feedback">
             <el-icon><ChatDotRound /></el-icon>
