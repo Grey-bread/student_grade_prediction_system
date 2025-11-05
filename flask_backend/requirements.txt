@@ -1,0 +1,11 @@
+flask
+flask-cors
+pandas
+scikit-learn
+mysql-connector-python
+numpy
+matplotlib
+seaborn
+PyJWT
+werkzeug
+python-dotenv

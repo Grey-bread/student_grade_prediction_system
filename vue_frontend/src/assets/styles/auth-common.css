@@ -1,0 +1,219 @@
+.login-container, .register-container {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: linear-gradient(315deg, #1989fa, #5cadff, #409eff, #79bbff);
+  background-size: 400% 400%;
+  animation: gradientBG 15s ease infinite;
+  position: relative;
+  overflow: hidden;
+}
+
+.login-container::before, .register-container::before {
+  content: '';
+  position: absolute;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(circle at center, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0) 60%);
+  animation: circleFade 8s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes gradientBG {
+  0% { background-position: 0% 50% }
+  50% { background-position: 100% 50% }
+  100% { background-position: 0% 50% }
+}
+
+@keyframes circleFade {
+  0% { transform: translate(-50%, -50%) scale(1); opacity: 0.8 }
+  50% { transform: translate(-50%, -50%) scale(1.2); opacity: 0.4 }
+  100% { transform: translate(-50%, -50%) scale(1); opacity: 0.8 }
+}
+
+.login-box, .register-box {
+  width: 400px;
+  padding: 40px;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  animation: boxFloat 6s ease-in-out infinite;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+@keyframes boxFloat {
+  0% { transform: translateY(0px) }
+  50% { transform: translateY(-10px) }
+  100% { transform: translateY(0px) }
+}
+
+.avatar-box {
+  text-align: center;
+  margin-bottom: 30px;
+  font-size: 88px;
+  color: #409eff;
+  text-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.avatar-box .el-icon {
+  padding: 8px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  transition: transform 0.3s ease;
+}
+
+.avatar-box .el-icon:hover {
+  transform: scale(1.05);
+}
+
+.login-header, .register-header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.login-header h2, .register-header h2 {
+  margin: 0;
+  font-size: 24px;
+  color: #333;
+}
+
+.hint {
+  color: #888;
+  font-size: 14px;
+  margin-top: 8px;
+}
+
+.login-form, .register-form {
+  width: 100%;
+}
+
+.input-item {
+  margin-bottom: 20px;
+}
+
+:root {
+  --auth-input-height: 44px;
+  --auth-input-radius: 22px;
+}
+
+:deep(.el-input__inner) {
+  height: var(--auth-input-height) !important;
+  line-height: var(--auth-input-height);
+  border-radius: var(--auth-input-radius);
+  background-color: #f5f7fa;
+  border: 1px solid #e4e7ed;
+  padding-left: 45px;
+  font-size: 14px;
+  transition: all 0.3s ease;
+}
+
+:deep(.el-input__inner):focus {
+  background-color: #fff;
+  border-color: #409eff;
+  box-shadow: 0 0 0 2px rgba(64,158,255,.2);
+}
+
+:deep(.el-input__prefix) {
+  left: 16px;
+}
+
+.login-btn, .submit-btn {
+  width: 100%;
+  height: var(--auth-input-height);
+  border-radius: var(--auth-input-radius);
+  font-size: 16px;
+  letter-spacing: 2px;
+  font-weight: 500;
+  margin: 10px 0 20px;
+}
+
+.divider {
+  position: relative;
+  text-align: center;
+  margin: 20px 0;
+}
+
+.divider span {
+  background: #fff;
+  padding: 0 10px;
+  color: #999;
+  font-size: 12px;
+  position: relative;
+  z-index: 1;
+}
+
+.divider::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: #eee;
+}
+
+.login-methods, .register-methods {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  margin: 20px 0;
+}
+
+.login-methods el-icon, .login-methods i,
+.register-methods el-icon, .register-methods i {
+  font-size: 24px;
+  color: #666;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.login-methods el-icon:hover, .login-methods i:hover,
+.register-methods el-icon:hover, .register-methods i:hover {
+  color: #1989fa;
+  transform: scale(1.1);
+}
+
+.register-link, .login-link {
+  text-align: center;
+  margin-top: 16px;
+}
+
+.register-link a, .login-link a, .register-link router-link, .login-link router-link {
+  color: #1989fa;
+  text-decoration: none;
+  font-size: 14px;
+  transition: color 0.3s;
+}
+
+.register-link a:hover, .login-link a:hover {
+  color: #66b1ff;
+}
+
+.login-options {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.forget-pwd {
+  color: #1989fa;
+  text-decoration: none;
+  transition: color 0.3s;
+}
+
+.forget-pwd:hover {
+  color: #66b1ff;
+}
+
+/* 验证错误时仅让内层输入框显示红色边框，避免出现外层矩形红框 */
+:deep(.el-form-item.is-error .el-input__inner) {
+  border-color: #f56c6c !important;
+  box-shadow: 0 0 0 4px rgba(245,108,108,0.06) !important;
+  background-color: #fff !important;
+}
