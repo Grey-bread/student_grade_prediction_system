@@ -75,46 +75,61 @@
       <el-tab-pane label="数据采集" name="collection">
         <div class="tab-content">
           <div class="collection-section">
-            <h3>数据源配置</h3>
-            <p class="section-description">配置和管理系统的数据采集来源</p>
-
-            <div class="data-sources">
-              <el-card v-for="source in dataSources" :key="source.id" class="source-card">
-                <template #header>
-                  <div class="card-header">
-                    <span>{{ source.name }}</span>
-                    <el-button type="text" size="small" @click="editDataSource(source)">编辑</el-button>
-                  </div>
-                </template>
-                <div class="source-info">
-                  <p><strong>类型：</strong>{{ source.type }}</p>
-                  <p><strong>状态：</strong>
-                    <el-tag :type="source.active ? 'success' : 'warning'">
-                      {{ source.active ? '已激活' : '未激活' }}
-                    </el-tag>
-                  </p>
-                  <p><strong>最后采集：</strong>{{ formatDate(source.lastCollection) }}</p>
-                  <el-button 
-                    type="primary" 
-                    size="small" 
-                    :disabled="!source.active"
-                    @click="collectData(source.id)">
-                    立即采集
-                  </el-button>
-                </div>
-              </el-card>
-
-              <el-card class="add-source-card">
-                <div class="add-source-content" @click="showAddSourceDialog">
-                  <el-icon class="add-icon"><Plus /></el-icon>
-                  <p>添加新数据源</p>
-                </div>
-              </el-card>
+            <h3>数据源</h3>
+            <div class="sources-toolbar">
+              <el-button type="primary" @click="showAddSourceDialog"><el-icon><Plus /></el-icon>&nbsp;添加数据源</el-button>
+              <el-button @click="loadData">刷新</el-button>
             </div>
+
+            <el-table :data="dataSources" style="width: 100%" border stripe empty-text="暂无数据源">
+              <el-table-column prop="name" label="名称" min-width="160" />
+              <el-table-column prop="type" label="类型" width="120" />
+              <el-table-column label="启用" width="120">
+                <template #default="scope">
+                  <el-switch 
+                    v-model="scope.row.active" 
+                    :active-value="true" 
+                    :inactive-value="false" 
+                    :disabled="!(scope.row.id > 0)"
+                    @change="toggleSourceActive(scope.row)" />
+                </template>
+              </el-table-column>
+              <el-table-column prop="lastCollection" label="最后采集" width="180">
+                <template #default="scope">{{ formatDate(scope.row.lastCollection) }}</template>
+              </el-table-column>
+              <el-table-column label="配置" min-width="220">
+                <template #default="scope">
+                  <el-tooltip placement="top" effect="dark" :content="String(scope.row.config || '')">
+                    <span class="config-ellipsis">{{ String(scope.row.config || '').slice(0, 50) }}<span v-if="String(scope.row.config || '').length > 50">...</span></span>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="260" fixed="right">
+                <template #default="scope">
+                  <el-button size="small" :disabled="!(scope.row.id > 0)" @click="editDataSource(scope.row)">编辑</el-button>
+                  <el-button size="small" type="primary" :disabled="!scope.row.active || !(scope.row.id > 0)" @click="collectData(scope.row.id)">立即采集</el-button>
+                  <template v-if="scope.row.id > 0">
+                    <el-popconfirm title="确认删除该数据源？" confirm-button-text="删除" cancel-button-text="取消" @confirm="deleteDataSource(scope.row)">
+                      <template #reference>
+                        <el-button size="small" type="danger">删除</el-button>
+                      </template>
+                    </el-popconfirm>
+                  </template>
+                  <template v-else>
+                    <el-tooltip content="内置临时项，不能删除" placement="top">
+                      <el-button size="small" type="danger" disabled>删除</el-button>
+                    </el-tooltip>
+                  </template>
+                </template>
+              </el-table-column>
+            </el-table>
 
             <!-- 采集任务列表 -->
             <div class="collection-tasks">
-              <h3>采集任务列表</h3>
+              <div class="tasks-header">
+                <h3>采集任务列表</h3>
+                <el-button size="small" type="danger" plain :disabled="(collectionTasks || []).length === 0" @click="clearTasks">清空</el-button>
+              </div>
               <el-table :data="collectionTasks || []" style="width: 100%" v-if="(collectionTasks || []).length > 0">
                 <el-table-column prop="name" label="任务名称" width="200"></el-table-column>
                 <el-table-column prop="source" label="数据源" width="150"></el-table-column>
@@ -170,7 +185,12 @@
           </el-select>
         </el-form-item>
         <el-form-item label="配置信息" prop="config">
-          <el-input type="textarea" v-model="newSource.config" placeholder="请输入配置信息"></el-input>
+          <el-input type="textarea" v-model="newSource.config" placeholder='请输入JSON，如 {"table":"exam_scores","key_column":"id","interval_seconds":30}' rows="5"></el-input>
+          <div class="json-tools">
+            <el-button type="text" @click="formatJson('new')">格式化JSON</el-button>
+            <el-button type="text" @click="applyTemplate('new','id')">模板：主键增量</el-button>
+            <el-button type="text" @click="applyTemplate('new','updated')">模板：时间戳增量</el-button>
+          </div>
         </el-form-item>
         <el-form-item>
           <el-switch v-model="newSource.active" active-text="启用" inactive-text="禁用"></el-switch>
@@ -188,20 +208,25 @@
     <el-dialog
       v-model="editSourceVisible"
       title="编辑数据源"
-      width="520px">
-      <el-form :model="editSource">
-        <el-form-item label="数据源名称">
-          <el-input v-model="editSource.name" />
+      width="500px">
+      <el-form :model="editSource" :rules="sourceRules" ref="editSourceForm">
+        <el-form-item label="数据源名称" prop="name">
+          <el-input v-model="editSource.name" placeholder="请输入数据源名称"></el-input>
         </el-form-item>
-        <el-form-item label="数据源类型">
+        <el-form-item label="数据源类型" prop="type">
           <el-select v-model="editSource.type" placeholder="请选择数据源类型">
             <el-option label="API接口" value="api"></el-option>
             <el-option label="数据库" value="database"></el-option>
             <el-option label="文件系统" value="file_system"></el-option>
           </el-select>
         </el-form-item>
-        <el-form-item label="配置信息">
-          <el-input type="textarea" v-model="editSource.config" />
+        <el-form-item label="配置信息" prop="config">
+          <el-input type="textarea" v-model="editSource.config" placeholder='请输入JSON，如 {"table":"exam_scores","key_column":"id","interval_seconds":30}' rows="5"></el-input>
+          <div class="json-tools">
+            <el-button type="text" @click="formatJson('edit')">格式化JSON</el-button>
+            <el-button type="text" @click="applyTemplate('edit','id')">模板：主键增量</el-button>
+            <el-button type="text" @click="applyTemplate('edit','updated')">模板：时间戳增量</el-button>
+          </div>
         </el-form-item>
         <el-form-item>
           <el-switch v-model="editSource.active" active-text="启用" inactive-text="禁用"></el-switch>
@@ -209,9 +234,8 @@
       </el-form>
       <template #footer>
         <span class="dialog-footer">
-          <el-button type="danger" @click="deleteSource(editSource.id)" v-if="editSource.id">删除</el-button>
           <el-button @click="editSourceVisible = false">取消</el-button>
-          <el-button type="primary" @click="saveEditSource">保存</el-button>
+          <el-button type="primary" @click="submitEditSource">保存</el-button>
         </span>
       </template>
     </el-dialog>
@@ -219,7 +243,7 @@
 </template>
 
 <script>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onBeforeUnmount } from 'vue'
 import { UploadFilled, Plus } from '@element-plus/icons-vue'
 import axios from 'axios'
 
@@ -246,29 +270,38 @@ export default {
       try {
         const [uploadsRes, sourcesRes, tasksRes] = await Promise.all([
           axios.get('/api/analysis/uploads'),
-          axios.get('/api/analysis/data-sources', { params: { onlySaved: 1 } }),
+          axios.get('/api/analysis/data-sources'),
           axios.get('/api/analysis/collection-tasks')
         ])
 
         uploadHistory.value = (uploadsRes.data && uploadsRes.data.data) || []
         dataSources.value = (sourcesRes.data && sourcesRes.data.data) || []
+        // 安全兜底：若全为临时项(id<=0)且数量>4，仅保留前4个
+        if (Array.isArray(dataSources.value) && dataSources.value.length > 4) {
+          const allTemp = dataSources.value.every(s => !s || !s.id || s.id <= 0)
+          if (allTemp) dataSources.value = dataSources.value.slice(0, 4)
+        }
         collectionTasks.value = (tasksRes.data && tasksRes.data.data) || []
       } catch (err) {
         console.error('加载数据失败: ', err)
       }
     }
     
-    // 组件挂载时加载数据
-    loadData()
+  // 组件挂载时加载数据 + 定时刷新
+  loadData()
+  const _refreshTimer = setInterval(loadData, 30000)
+  onBeforeUnmount(() => clearInterval(_refreshTimer))
     
     // 新增数据源对话框
     const addSourceVisible = ref(false)
+    const editSourceVisible = ref(false)
     const newSource = reactive({
       name: '',
       type: '',
       config: '',
       active: true
     })
+    const editSource = reactive({ id: null, name: '', type: '', config: '', active: true })
     
     // 数据源表单验证规则
     const sourceRules = {
@@ -349,46 +382,35 @@ export default {
     }
     
     // 编辑数据源
-    const editSourceVisible = ref(false)
-    const editSource = reactive({ id: null, name: '', type: '', config: '', active: true, lastCollection: null })
-    const editDataSource = (source) => {
-      editSource.id = source.id
-      editSource.name = source.name
-      editSource.type = source.type
-      editSource.config = source.config || ''
-      editSource.active = !!source.active
-      editSource.lastCollection = source.lastCollection || null
-      editSourceVisible.value = true
-    }
-    const saveEditSource = async () => {
-      try {
-        await axios.patch(`/api/analysis/data-sources/${editSource.id}` , {
-          name: editSource.name,
-          type: editSource.type,
-          config: editSource.config,
-          active: editSource.active
-        })
-        await loadData()
-        editSourceVisible.value = false
-      } catch (err) {
-        console.error('更新数据源失败: ', err)
-        alert('更新失败，请重试')
+    const editDataSource = async (source) => {
+      if (!source || !source.id || source.id <= 0) {
+        alert('此数据源为临时/内置项，无法直接编辑，请先添加为正式数据源')
+        return
       }
-    }
-    const deleteSource = async (id) => {
       try {
-        await axios.delete(`/api/analysis/data-sources/${id}`)
-        await loadData()
-        editSourceVisible.value = false
+        // 获取完整数据（包含 config）
+        const res = await axios.get(`/api/analysis/data-sources/${source.id}`)
+        const data = (res && res.data && res.data.data) || source
+        Object.assign(editSource, {
+          id: data.id,
+          name: data.name,
+          type: data.type,
+          config: data.config || '',
+          active: Boolean(data.active)
+        })
+        editSourceVisible.value = true
       } catch (err) {
-        console.error('删除数据源失败: ', err)
-        alert('删除失败，请重试')
+        console.error('加载数据源失败: ', err)
+        alert('加载数据源失败')
       }
     }
     
     // 提交新数据源
+    const validateJson = (val) => { try { if (!val || typeof val !== 'string') return false; JSON.parse(val); return true } catch { return false } }
+
     const submitNewSource = async () => {
       try {
+        if (!validateJson(newSource.config)) { alert('配置信息必须是有效的JSON'); return }
         await axios.post('/api/analysis/data-sources', {
           name: newSource.name,
           type: newSource.type,
@@ -405,38 +427,115 @@ export default {
       }
     }
     
+    const submitEditSource = async () => {
+      if (!editSource.id) return
+      try {
+        if (!validateJson(editSource.config)) { alert('配置信息必须是有效的JSON'); return }
+        await axios.put(`/api/analysis/data-sources/${editSource.id}`, {
+          name: editSource.name,
+          type: editSource.type,
+          config: editSource.config,
+          active: editSource.active
+        })
+        await loadData()
+        editSourceVisible.value = false
+      } catch (err) {
+        console.error('更新数据源失败: ', err)
+        alert('更新失败，请检查后端服务。')
+      }
+    }
+
+    const deleteDataSource = async (source) => {
+      if (!source || !source.id || source.id <= 0) return
+      try {
+        await axios.delete(`/api/analysis/data-sources/${source.id}`)
+        await loadData()
+      } catch (err) {
+        console.error('删除数据源失败: ', err)
+        alert('删除失败，请检查后端服务。')
+      }
+    }
+
+    const toggleSourceActive = async (source) => {
+      try {
+        if (!source || !source.id || source.id <= 0) { alert('临时数据源不可切换，请先创建'); return }
+        await axios.put(`/api/analysis/data-sources/${source.id}`, {
+          name: source.name,
+          type: source.type,
+          config: source.config || '',
+          active: !!source.active
+        })
+        await loadData()
+      } catch (err) {
+        console.error('切换启用失败: ', err)
+        alert('切换失败，请检查后端服务。')
+      }
+    }
+
+    const formatJson = (mode) => {
+      try {
+        if (mode === 'new') {
+          const obj = JSON.parse(newSource.config || '{}')
+          newSource.config = JSON.stringify(obj, null, 2)
+        } else {
+          const obj = JSON.parse(editSource.config || '{}')
+          editSource.config = JSON.stringify(obj, null, 2)
+        }
+      } catch (_) { alert('JSON 无法格式化，请检查语法') }
+    }
+
+    const applyTemplate = (mode, type) => {
+      const tplId = '{\n  "table": "exam_scores",\n  "key_column": "id",\n  "interval_seconds": 30\n}'
+      const tplUpdated = '{\n  "table": "historical_grades",\n  "updated_at_column": "updated_at",\n  "interval_seconds": 30\n}'
+      const tpl = type === 'updated' ? tplUpdated : tplId
+      if (mode === 'new') newSource.config = tpl; else editSource.config = tpl
+    }
+    
     // 采集数据
     const collectData = async (sourceId) => {
       const source = dataSources.value.find(s => s.id === sourceId)
       if (!source) return
 
-      let createdId = null
+      // 先在后端创建任务，获取真实任务ID
+      let taskId = null
       try {
-        const resp = await axios.post('/api/analysis/collection-tasks', {
-          source_id: source.id > 0 ? source.id : null,
+        const res = await axios.post('/api/analysis/collection-tasks', {
+          source_id: source.id,
           source_name: source.name,
           name: `${source.name}数据采集`
         })
-        createdId = resp?.data?.data?.id || null
+        taskId = (res && res.data && res.data.id) || null
       } catch (err) {
-        console.error('创建采集任务失败: ', err)
+        console.error('创建任务失败: ', err)
       }
 
-      // 本地创建一个运行中任务用于展示进度
-      const taskId = createdId || Date.now()
+      // 调用后端立即采集一次（刷新缓存）
+      if (source.id > 0) {
+        try {
+          await axios.post(`/api/analysis/data-sources/${source.id}/collect`)
+        } catch (err) {
+          console.error('立即采集失败: ', err)
+        }
+      }
+
+      // 本地创建一个运行中任务用于展示进度（视觉反馈）
+      const localId = taskId || Date.now()
       collectionTasks.value.unshift({
-        id: taskId,
+        id: localId,
         name: `${source.name}数据采集`,
         source: source.name,
         status: 'running',
         progress: 0,
         createdAt: new Date().toLocaleString()
       })
-      simulateCollectionProgress(taskId, createdId, source.id)
+      simulateCollectionProgress(localId, !!taskId)
     }
     
     // 模拟采集进度
-    const simulateCollectionProgress = (taskId, serverId, sourceId) => {
+    // 存放本地任务的 interval，便于清空和取消
+    const taskIntervals = {}
+
+    const simulateCollectionProgress = (taskId, hasServer = false) => {
       const task = collectionTasks.value.find(t => t.id === taskId)
       if (!task) return
       
@@ -446,24 +545,25 @@ export default {
         if (progress >= 100) {
           progress = 100
           task.status = 'completed'
-          if (serverId) {
-            axios.patch(`/api/analysis/collection-tasks/${serverId}`, { status: 'completed', progress: 100 }).catch(()=>{})
-          }
           clearInterval(interval)
+          delete taskIntervals[taskId]
           
           // 更新数据源最后采集时间
           const source = dataSources.value.find(s => s.name === task.source)
           if (source) {
             source.lastCollection = new Date().toLocaleString()
           }
+
+          // 将完成状态同步到后端任务（若有真实任务ID）
+          if (hasServer) {
+            axios.put(`/api/analysis/collection-tasks/${taskId}`, { status: 'completed', progress: 100 }).catch(()=>{})
+          }
           
           console.log('数据采集完成:', task.name)
         }
         task.progress = Math.floor(progress)
-        if (serverId) {
-          axios.patch(`/api/analysis/collection-tasks/${serverId}`, { progress: task.progress }).catch(()=>{})
-        }
       }, 500)
+      taskIntervals[taskId] = interval
     }
     
     // 取消任务
@@ -475,6 +575,24 @@ export default {
       }
       const task = collectionTasks.value.find(t => t.id === taskId)
       if (task) task.status = 'cancelled'
+      if (taskIntervals[taskId]) {
+        try { clearInterval(taskIntervals[taskId]) } catch (_) {}
+        delete taskIntervals[taskId]
+      }
+    }
+
+    const clearTasks = async () => {
+      // 停止所有本地 interval
+      Object.keys(taskIntervals).forEach(k => {
+        try { clearInterval(taskIntervals[k]) } catch (_) {}
+        delete taskIntervals[k]
+      })
+      try {
+        await axios.delete('/api/analysis/collection-tasks')
+      } catch (err) {
+        console.error('清空任务失败: ', err)
+      }
+      collectionTasks.value = []
     }
     
     // 格式化日期
@@ -517,10 +635,10 @@ export default {
       uploadHistory,
       dataSources,
       collectionTasks,
-      addSourceVisible,
+  addSourceVisible,
+  editSourceVisible,
       newSource,
-      editSourceVisible,
-      editSource,
+  editSource,
       sourceRules,
       handleFileChange,
       beforeUpload,
@@ -528,11 +646,15 @@ export default {
       viewFileDetails,
       showAddSourceDialog,
       editDataSource,
-      saveEditSource,
-      deleteSource,
       submitNewSource,
+  deleteDataSource,
+  toggleSourceActive,
+  formatJson,
+  applyTemplate,
+  submitEditSource,
       collectData,
       cancelTask,
+      clearTasks,
       formatDate,
       getStatusType,
       getStatusProgress
@@ -619,10 +741,7 @@ export default {
 }
 
 .data-sources {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 20px;
-  margin-bottom: 30px;
+  display: none; /* 已改为表格展示 */
 }
 
 .source-card {
@@ -639,39 +758,52 @@ export default {
   justify-content: space-between;
   align-items: center;
 }
+.card-header .actions { display: flex; align-items: center; gap: 6px; }
 
 .source-info p {
   margin-bottom: 10px;
 }
 
+.json-tools { margin-top: 6px; }
+
 .add-source-card {
-  border: 2px dashed #dcdfe6;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 120px;
-  cursor: pointer;
-  transition: all 0.3s ease;
+  display: none; /* 已改为表格工具栏添加按钮 */
 }
 
-.add-source-card:hover {
-  border-color: #409eff;
-  color: #409eff;
-}
+.add-source-card:hover { display: none; }
 
 .add-source-content {
-  text-align: center;
-  padding: 20px;
+  display: none;
 }
 
 .add-icon {
-  font-size: 32px;
-  margin-bottom: 10px;
+  display: none;
 }
 
 /* 采集任务样式 */
 .collection-tasks {
   margin-top: 30px;
+}
+
+.tasks-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.sources-toolbar {
+  display: flex;
+  gap: 10px;
+  margin: 8px 0 14px;
+}
+
+.config-ellipsis {
+  display: inline-block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 空状态样式 */

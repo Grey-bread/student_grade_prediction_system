@@ -42,6 +42,13 @@ app.register_blueprint(training_bp, url_prefix="/api/training")
 logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 
+# 启动自动采集调度器（若已安装 APScheduler）
+try:
+    from services.collector import DataCollector
+    DataCollector.instance().start()
+except Exception as _:
+    print('[WARN] 自动采集调度器未启动（可能未安装 APScheduler），不影响主功能')
+
 @app.errorhandler(Exception)
 def handle_exception(e):
     """全局异常捕获，避免未处理异常导致服务器崩溃。"""

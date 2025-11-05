@@ -2,7 +2,7 @@
 模型训练路由
 
 职责：
-- 提供基于数据库真实数据的训练接口（POST /train）
+- 提供基于数据库数据的训练接口（POST /train）
 - 提供已保存模型列表（GET /models）
 - 提供训练数据统计（GET /data-stats）
 
@@ -20,6 +20,7 @@ import sys
 import pickle
 import os
 from datetime import datetime
+from routes.analysis_routes import get_table_data
 
 training_bp = Blueprint('training_bp', __name__)
 
@@ -41,11 +42,19 @@ def train_model():
         target_column = data.get('targetColumn', 'total_score')
         test_size = float(data.get('testSize', 0.2))
         data_source = data.get('dataSource', 'database')  # database 或 upload
+        table_override = data.get('table')  # 可选：自定义表名
 
         print(f"[TRAIN] 开始训练模型 - 目标列: {target_column}, 测试集比例: {test_size}")
         
         # 从数据库加载训练数据
-        if data_source == 'database':
+        if table_override:
+            # 通用：直接从指定表加载数据
+            df = get_table_data(table_override)
+            if df is None or df.empty:
+                return jsonify({'status': 'error', 'message': f'表 {table_override} 无数据可用于训练'}), 400
+            # 仅保留数值/分类列，由预处理负责编码
+            # 下方将检查目标列是否存在
+        elif data_source == 'database':
             # 查询历史成绩数据，联合学生信息
             query = """
                 SELECT 

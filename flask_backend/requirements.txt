@@ -9,3 +9,5 @@ seaborn
 PyJWT
 werkzeug
 python-dotenv
+APScheduler
+openpyxl

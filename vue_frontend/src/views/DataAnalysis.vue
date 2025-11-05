@@ -26,7 +26,6 @@
                   :value="table"
                 >
                   <span style="float: left">{{ getTableDisplayName(table) }}</span>
-                  <span style="float: right; color: #8492a6; font-size: 13px">{{ table }}</span>
                 </el-option>
               </el-select>
             </el-form-item>
@@ -229,8 +228,6 @@ export default {
       loading: false,
       loadingTables: false,
       hasCorrelationData: false,
-      // 允许在数据分析中选择的白名单表
-      allowedTables: ['class_performance', 'historical_grades', 'exam_scores', 'students'],
       tableNameMap: {
         'students': '学生信息表',
         'historical_grades': '历史成绩表',
@@ -259,7 +256,34 @@ export default {
   methods: {
     // 获取表的显示名称
     getTableDisplayName(tableName) {
-      return this.tableNameMap[tableName] || tableName
+      // 先用内置映射
+      if (this.tableNameMap[tableName]) return this.tableNameMap[tableName]
+      // 若包含非ASCII（如中文），直接返回
+      if (/[^\x00-\x7F]/.test(tableName)) return tableName
+      // 英文名转中文
+      return this.translateTableName(tableName)
+    },
+    // 英文表名转中文友好名（无英文展示）
+    translateTableName(name) {
+      const dict = {
+        'students': '学生', 'student': '学生',
+        'exam': '考试', 'exams': '考试',
+        'score': '成绩', 'scores': '成绩',
+        'class': '课堂', 'classes': '课堂',
+        'performance': '表现',
+        'historical': '历史', 'history': '历史',
+        'grade': '成绩', 'grades': '成绩',
+        'course': '课程', 'courses': '课程',
+        'teacher': '教师', 'teachers': '教师',
+        'type': '类型', 'types': '类型',
+        'record': '记录', 'records': '记录',
+        'upload': '上传', 'data': '数据', 'source': '来源', 'mapping': '映射',
+        'sync': '同步', 'state': '状态', 'status': '状态'
+      }
+      const parts = String(name).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+      const cn = parts.map(p => dict[p]).filter(Boolean)
+      if (cn.length) return cn.join('') + '表'
+      return '自定义表'
     },
     
     // 初始化所有图表
@@ -294,8 +318,8 @@ export default {
         .then(response => {
           if (response.data.status === 'success') {
             const allTables = response.data.tables || []
-            // 仅保留白名单中的表
-            this.availableTables = allTables.filter(t => this.allowedTables.includes(t))
+            // 使用后端返回的全部表，允许用户选择上传的任意表
+            this.availableTables = allTables
             
             // 如果当前选择不在白名单或可用表中，进行重置
             if (!this.availableTables.includes(this.analysisForm.selectedTable)) {

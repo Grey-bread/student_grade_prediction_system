@@ -504,13 +504,19 @@ def dashboard_overview():
     try:
         tid = _get_teacher_id_from_auth()
 
+        # 允许前端覆盖表名，方便使用上传的自定义表
+        exam_table = request.args.get('exam_table', 'exam_scores')
+        hist_table = request.args.get('hist_table', 'historical_grades')
+        courses_table = request.args.get('courses_table', 'courses')
+
         # 加载数据（支持DB或CSV回退）
-        exam_df = get_table_data('exam_scores')
+        exam_df = get_table_data(exam_table)
         if exam_df is None:
             exam_df = pd.DataFrame()
-        hist_df = get_table_data('historical_grades')
+        hist_df = get_table_data(hist_table)
         if hist_df is None:
             hist_df = pd.DataFrame()
+        # 课程表在此接口仅用于 total_students_all 之外的功能时再取用，当前不强制
 
         # 过滤本教师数据
         teacher_exam = exam_df[exam_df['teacher_id'].astype(str) == tid] if not exam_df.empty and 'teacher_id' in exam_df.columns else pd.DataFrame()
@@ -578,13 +584,17 @@ def dashboard_courses():
     """教师所授课程列表及指标。"""
     try:
         tid = _get_teacher_id_from_auth()
-        exam_df = get_table_data('exam_scores')
+        exam_table = request.args.get('exam_table', 'exam_scores')
+        hist_table = request.args.get('hist_table', 'historical_grades')
+        courses_table = request.args.get('courses_table', 'courses')
+
+        exam_df = get_table_data(exam_table)
         if exam_df is None:
             exam_df = pd.DataFrame()
-        hist_df = get_table_data('historical_grades')
+        hist_df = get_table_data(hist_table)
         if hist_df is None:
             hist_df = pd.DataFrame()
-        courses_df = get_table_data('courses')
+        courses_df = get_table_data(courses_table)
         if courses_df is None:
             courses_df = pd.DataFrame()
 
@@ -655,10 +665,12 @@ def dashboard_recent_exams():
     """最近考试列表（最多10条）。"""
     try:
         tid = _get_teacher_id_from_auth()
-        exam_df = get_table_data('exam_scores')
+        exam_table = request.args.get('exam_table', 'exam_scores')
+        courses_table = request.args.get('courses_table', 'courses')
+        exam_df = get_table_data(exam_table)
         if exam_df is None:
             exam_df = pd.DataFrame()
-        courses_df = get_table_data('courses')
+        courses_df = get_table_data(courses_table)
         if courses_df is None:
             courses_df = pd.DataFrame()
         # 过滤
@@ -701,7 +713,8 @@ def dashboard_score_level():
     """成绩等级分布（A-E）。"""
     try:
         tid = _get_teacher_id_from_auth()
-        exam_df = get_table_data('exam_scores')
+        exam_table = request.args.get('exam_table', 'exam_scores')
+        exam_df = get_table_data(exam_table)
         if exam_df is None:
             exam_df = pd.DataFrame()
         ex = exam_df[exam_df['teacher_id'].astype(str) == tid] if not exam_df.empty and 'teacher_id' in exam_df.columns else pd.DataFrame()

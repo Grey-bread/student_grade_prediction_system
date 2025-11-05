@@ -89,6 +89,31 @@ def execute_query(query, params=None):
         conn.close()
 
 
+def execute_many(query, seq_params):
+    """批量执行写操作（INSERT/UPDATE/DELETE）。"""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.executemany(query, seq_params or [])
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def execute_insert_return_id(query, params=None):
+    """执行INSERT并返回自增ID。"""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(query, params or ())
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        cur.close()
+        conn.close()
+
+
 def fetch_one(query, params=None):
     """查询一条记录，返回 dict。"""
     conn = get_connection()
@@ -123,6 +148,28 @@ def get_tables():
         cur.execute("SHOW TABLES")
         tables = [table[0] for table in cur.fetchall()]
         return tables
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_columns(table_name: str):
+    """获取指定表的所有列名。"""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        # 使用 INFORMATION_SCHEMA 查询当前数据库的列
+        cur.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+            ORDER BY ORDINAL_POSITION
+            """,
+            (table_name,)
+        )
+        cols = [row[0] for row in cur.fetchall()]
+        return cols
     finally:
         cur.close()
         conn.close()

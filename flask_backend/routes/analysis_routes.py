@@ -3,7 +3,6 @@
 
 职责：
 - 提供表清单、统计分析、学生反馈、趋势、相关性等接口
-- 读取数据库或 CSV 回退数据，统一返回 JSON 结果
 
 注意：
 - 模块较大，核心方法均在端点内有说明
@@ -16,7 +15,7 @@ from flask import Response, send_file
 import pandas as pd
 import numpy as np
 import traceback, sys
-from database import fetch_all, get_tables, execute_query
+from database import fetch_all, get_tables, execute_query, fetch_one, get_columns, execute_insert_return_id, execute_many
 import os
 import io
 import zipfile
@@ -25,11 +24,27 @@ from pathlib import Path
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from services.preprocessing import preprocess_df
+import re
 
 analysis_bp = Blueprint('analysis_bp', __name__)
 
 # 用于存储处理后的数据的内存缓存
 global_data = {}
+global_data['dirty_tables'] = set()
+global_data['column_labels'] = {}
+
+def mark_table_dirty(table_name: str):
+    try:
+        if not isinstance(table_name, str) or not table_name:
+            return
+        ds = global_data.get('dirty_tables')
+        if isinstance(ds, set):
+            ds.add(table_name)
+        else:
+            global_data['dirty_tables'] = {table_name}
+    except Exception:
+        # 兜底，避免影响主流程
+        pass
 
 # 预定义表结构映射，用于优化特定表的处理
 table_structures = {
@@ -150,15 +165,21 @@ def student_feedback():
     try:
         student_id = request.args.get('student_id')
         course_id = request.args.get('course_id')
+        # 可选：允许前端覆盖默认使用的表，便于使用上传的自定义表
+        students_table = request.args.get('students_table', 'students')
+        grades_table = request.args.get('grades_table', 'historical_grades')
+        exams_table = request.args.get('exams_table', 'exam_scores')
+        performance_table = request.args.get('performance_table', 'class_performance')
+        courses_table = request.args.get('courses_table', 'courses')
         if not student_id:
             return jsonify({'status': 'error', 'message': '缺少参数: student_id'}), 400
 
         # 读取所需表的数据（优先DB，失败则CSV）
-        students_df = get_table_data('students')
-        hg_df = get_table_data('historical_grades')
-        exam_df = get_table_data('exam_scores')
-        perf_df = get_table_data('class_performance')
-        courses_df = get_table_data('courses')
+        students_df = get_table_data(students_table)
+        hg_df = get_table_data(grades_table)
+        exam_df = get_table_data(exams_table)
+        perf_df = get_table_data(performance_table)
+        courses_df = get_table_data(courses_table)
 
         # 学生基本信息
         student_info = None
@@ -748,6 +769,26 @@ def get_numeric_columns(df, table_name):
 def get_friendly_column_name(col):
     """获取列的友好显示名称"""
     key = str(col or '').strip()
+    # 优先使用上传时记录的原始/显示列名映射
+    try:
+        table_name = global_data.get('current_table')
+        if isinstance(table_name, str) and table_name:
+            labels_cache = global_data.get('column_labels') or {}
+            labels = labels_cache.get(table_name)
+            if labels is None:
+                rows = fetch_all(
+                    "SELECT stored_name, COALESCE(display_name, original_name) AS label FROM table_column_mapping WHERE table_name=%s ORDER BY column_order",
+                    [table_name]
+                ) or []
+                labels = {r.get('stored_name'): r.get('label') for r in rows if r.get('stored_name')}
+                if 'column_labels' not in global_data:
+                    global_data['column_labels'] = {}
+                global_data['column_labels'][table_name] = labels
+            disp = labels.get(key)
+            if isinstance(disp, str) and disp.strip():
+                return disp.strip()
+    except Exception:
+        pass
     if key in feature_name_map:
         return feature_name_map[key]
     # 统一小写用于关键词匹配
@@ -781,6 +822,21 @@ def get_table_data(table_name):
         print(f"错误: 无效的表名 '{table_name}'")
         return None
     
+    # 若被标记为脏，强制清理缓存
+    try:
+        if table_name in (global_data.get('dirty_tables') or set()):
+            if 'processed_data' in global_data:
+                del global_data['processed_data']
+            if 'current_data' in global_data:
+                del global_data['current_data']
+            # 移除脏标记
+            (global_data.get('dirty_tables') or set()).discard(table_name)
+            # 使 current_table 与传入不同，强制重新加载
+            global_data['current_table'] = None
+            print(f"表 {table_name} 命中脏标记，已清理缓存")
+    except Exception:
+        pass
+
     # 清空旧缓存以避免混淆
     if global_data.get('current_table') != table_name:
         print(f"切换表，清空旧缓存")
@@ -1509,142 +1565,95 @@ def get_correlation():
 
 @analysis_bp.route('/score-distribution', methods=['GET'])
 def get_score_distribution():
-    """获取成绩分布数据 - 用于分布图 - 固定使用historical_grades表的4个成绩列"""
+    """
     try:
-        # 固定使用historical_grades表
-        table_name = 'historical_grades'
+        table_name = request.args.get('table', 'historical_grades')
         student_id = request.args.get('student_id')
-        
-        # 固定使用的4个成绩列
-        score_columns = ['midterm_score', 'final_score', 'usual_score', 'total_score']
-        column_names = ['期中成绩', '期末成绩', '平时成绩', '总成绩']
-        
-        # 获取表数据
+
         df = get_table_data(table_name)
         if df is None or df.empty:
-            print(f"[分布图] {table_name}表为空，所有成绩显示0分")
-            return jsonify({
-                'status': 'success',
-                'features': column_names,
-                'data': [0, 0, 0, 0],
-                'message': '暂无数据'
-            }), 200
-        
-        print(f"[分布图] 成功获取{table_name}表，共{len(df)}条记录")
-        
-        # 检查是否应该按学生ID过滤
-        use_student_data = False
-        actual_student_id = student_id
-        
+            return jsonify({'status': 'success', 'features': [], 'data': [], 'message': '暂无数据'}), 200
+
+        # 可选按学生过滤
         if student_id and 'student_id' in df.columns:
             student_df = df[df['student_id'].astype(str) == str(student_id)]
             if not student_df.empty:
-                # 学生在表中有数据
                 df = student_df
-                use_student_data = True
-                print(f"[分布图] 使用学生{student_id}的数据，共{len(df)}条记录")
-            else:
-                # 学生在表中无数据，使用表中第一个学生的数据作为示例
-                available_students = df['student_id'].unique()
-                if len(available_students) > 0:
-                    actual_student_id = available_students[0]
-                    student_df = df[df['student_id'] == actual_student_id]
-                    df = student_df
-                    use_student_data = True
-                    print(f"[分布图] 学生{student_id}在{table_name}表中无数据，改用学生{actual_student_id}的数据（共{len(df)}条记录）")
-                else:
-                    print(f"[分布图] {table_name}表中无任何学生数据")
-        else:
-            print(f"[分布图] 使用全部学生的成绩分布，共{len(df)}条记录")
-        
-        # 准备返回数据
-        features = []
-        data = []
-        
-        # 对4个成绩列逐个计算平均值
-        for i, col in enumerate(score_columns):
-            feature_name = column_names[i]
-            
-            # 检查列是否存在
-            if col not in df.columns:
-                print(f"[分布图] 列{col}不存在，显示0分")
-                features.append(feature_name)
-                data.append(0)
-                continue
-            
+
+        # 选择最多4个数值列（关键词优先）
+        numeric_cols = []
+        for col in df.columns:
             try:
-                # 计算该列的平均值
-                column_data = df[col].dropna()
-                
-                if len(column_data) == 0:
-                    # 该列全是空值
-                    print(f"[分布图] {col}: 无有效数据，显示0分")
-                    features.append(feature_name)
-                    data.append(0)
-                else:
-                    # 有数据，计算平均值
-                    mean_val = float(column_data.mean())
-                    if np.isnan(mean_val):
-                        mean_val = 0
-                    features.append(feature_name)
-                    data.append(round(mean_val, 2))
-                    data_source = f"学生{actual_student_id}" if use_student_data else "全部学生"
-                    print(f"[分布图] {col}: {round(mean_val, 2)}分 ({data_source}, {len(column_data)}条有效记录)")
-                    
-            except Exception as e:
-                print(f"[分布图] 处理列{col}时出错: {e}，显示0分")
-                features.append(feature_name)
+                ser = pd.to_numeric(df[col], errors='coerce')
+                if ser.notna().sum() > 0:
+                    numeric_cols.append(col)
+            except Exception:
+                continue
+        if not numeric_cols:
+            return jsonify({'status': 'success', 'features': [], 'data': [], 'message': '无可用数值列'}), 200
+
+        def _priority(c):
+            low = str(c).lower()
+            score_like = any(k in low for k in ['score', 'grade', '分', '绩'])
+            return (0 if score_like else 1, c)
+
+        numeric_cols = sorted(numeric_cols, key=_priority)[:4]
+
+        features, data = [], []
+        for col in numeric_cols:
+            fname = get_friendly_column_name(col)
+            try:
+                vals = pd.to_numeric(df[col], errors='coerce').dropna()
+                mean_val = float(vals.mean()) if len(vals) > 0 else 0.0
+                if np.isnan(mean_val):
+                    mean_val = 0.0
+                features.append(fname)
+                data.append(round(mean_val, 2))
+            except Exception:
+                features.append(fname)
                 data.append(0)
-        
-        return jsonify({
-            'status': 'success',
-            'features': features,
-            'data': data,
-            'table': 'historical_grades',
-            'columns': score_columns,
-            'student_id': actual_student_id if use_student_data else None,
-            'data_source': f'学生{actual_student_id}' if use_student_data else '全部学生平均'
-        }), 200
-        return jsonify({
-            'status': 'success',
-            'features': features,
-            'data': data,
-            'table': 'historical_grades',
-            'columns': score_columns
-        }), 200
-        
+
+        return jsonify({'status': 'success', 'features': features, 'data': data}), 200
+
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @analysis_bp.route('/grade-distribution', methods=['GET'])
 def get_grade_distribution():
-    """获取成绩等级分布 - 用于饼图 - 固定使用exam_scores表的score_level列"""
+    """
     try:
-        # 固定使用exam_scores表和score_level列
-        table_name = 'exam_scores'
-        score_level_column = 'score_level'
-        
-        # 获取表数据
+        table_name = request.args.get('table', 'exam_scores')
+        score_level_column = request.args.get('column')
+
         df = get_table_data(table_name)
         if df is None or df.empty:
-            return jsonify({
-                'status': 'error',
-                'message': '无法获取exam_scores表数据'
-            }), 404
-        
-        # 验证score_level列存在
-        if score_level_column not in df.columns:
-            return jsonify({
-                'status': 'error',
-                'message': 'exam_scores表中没有score_level列'
-            }), 404
-        
-        print(f"[饼图] 使用exam_scores表的score_level列进行等级分布统计")
+            return jsonify({'status': 'error', 'message': '无法获取数据表'}), 404
+
+        # 自动识别分类列
+        if not score_level_column or score_level_column not in df.columns:
+            cand = None
+            for col in df.columns:
+                low = str(col).lower()
+                if any(k in low for k in ['level', 'grade', 'rank', '等级', '级别']):
+                    cand = col
+                    break
+            if cand is None:
+                for col in df.columns:
+                    try:
+                        uniq = df[col].dropna().astype(str).nunique()
+                        if 2 <= uniq <= 8:
+                            cand = col
+                            break
+                    except Exception:
+                        continue
+            score_level_column = cand if cand else None
+
+        if not score_level_column or score_level_column not in df.columns:
+            data = [{'name': n, 'value': 0} for n in ['A级(优秀)', 'B级(良好)', 'C级(中等)', 'D级(及格)', 'E级(不及格)']]
+            return jsonify({'status': 'success', 'data': data, 'total': 0, 'table': table_name}), 200
+
         
         # 按学生分组，获取每个学生的主要等级（最常见的等级）
         if 'student_id' in df.columns:
@@ -1712,8 +1721,8 @@ def get_grade_distribution():
             'data': data,
             'total': total_count,
             'stat_method': 'student_most_common_level' if 'student_id' in df.columns else 'all_records',
-            'table': 'exam_scores',
-            'column': 'score_level'
+            'table': table_name,
+            'column': score_level_column
         }), 200
         
     except Exception as e:
@@ -2270,7 +2279,7 @@ def ensure_management_tables():
               updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """
-        )
+    )
     except Exception as e:
         print(f"[数据管理] 初始化管理表失败: {e}")
 
@@ -2306,23 +2315,240 @@ def uploads_endpoint():
             return jsonify({'status': 'error', 'message': '请提供要上传的文件'}), 400
 
         saved = []
+        # 工具方法：表名保留原样（支持中文/空格等），仅移除反引号与控制字符，避免SQL注入/解析问题
+        def _preserve_table_name(name: str) -> str:
+            s = str(name or '').strip()
+            # 移除反引号，防止与SQL引用冲突
+            s = s.replace('`', '')
+            # 去除不可见控制字符
+            s = re.sub(r"[\x00-\x1F\x7F]", "", s)
+            # 空名兜底
+            return s or 'uploaded_table'
+
+        # 工具方法：列名清洗（尽量保留原始中文/空格等，仅移除反引号和控制字符）
+        def _clean_column_name(raw) -> str:
+            try:
+                if pd.isna(raw):
+                    return ''
+            except Exception:
+                pass
+            s = str(raw or '').strip()
+            # 去掉反引号，避免与SQL引用冲突
+            s = s.replace('`', '')
+            # 去除不可见控制字符
+            s = re.sub(r"[\x00-\x1F\x7F]", "", s)
+            return s
+
+        # 工具方法：推断 MySQL 列类型
+        def _infer_mysql_type(s: pd.Series) -> str:
+            if pd.api.types.is_bool_dtype(s):
+                return 'TINYINT(1)'
+            if pd.api.types.is_integer_dtype(s):
+                return 'BIGINT'
+            if pd.api.types.is_float_dtype(s):
+                return 'DOUBLE'
+            if pd.api.types.is_datetime64_any_dtype(s):
+                return 'DATETIME'
+            try:
+                lens = s.astype(str).map(lambda x: len(x) if x is not None else 0)
+                max_len = int(lens.max() or 0)
+            except Exception:
+                max_len = 255
+            if max_len <= 0:
+                max_len = 64
+            if max_len > 1000:
+                return 'TEXT'
+            return f"VARCHAR({min(max_len+10, 255)})"
+
         for f in files:
             try:
-                fname = secure_filename(f.filename)
+                # 文件名保留原样（含中文），仅移除危险字符，不做前缀/改名
+                def _sanitize_filename(name: str) -> str:
+                    s = str(name or '').strip()
+                    # 去除路径分隔与 Windows 非法字符
+                    s = s.replace('\\', '_').replace('/', '_')
+                    s = re.sub(r'[<>:"\\|?*]', '_', s)
+                    # 去除控制字符
+                    s = re.sub(r'[\x00-\x1F\x7F]', '', s)
+                    return s or 'uploaded_file'
+
+                fname = _sanitize_filename(getattr(f, 'filename', ''))
                 if not fname:
                     continue
                 # 避免重名：前缀时间戳
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-                final_name = f"{ts}_{fname}"
-                target_path = UPLOAD_DIR / final_name
+                subdir = UPLOAD_DIR / ts
+                subdir.mkdir(parents=True, exist_ok=True)
+                target_path = subdir / fname
                 f.save(str(target_path))
 
-                # 记录数据库
-                execute_query(
+                # 记录上传
+                up_id = execute_insert_return_id(
                     "INSERT INTO upload_history (filename, file_size, mime_type, stored_path, status) "
                     "VALUES (%s, %s, %s, %s, %s)",
                     [fname, os.path.getsize(target_path), f.mimetype, str(target_path), 'success']
                 )
+
+                # 读取文件为 DataFrame
+                df = None
+                try:
+                    if fname.lower().endswith('.csv'):
+                        try:
+                            df = pd.read_csv(str(target_path))
+                        except UnicodeDecodeError:
+                            df = pd.read_csv(str(target_path), encoding='gbk', errors='ignore')
+                    elif fname.lower().endswith(('.xlsx', '.xls')):
+                        try:
+                            df = pd.read_excel(str(target_path))
+                        except ImportError as ie:
+                            raise RuntimeError('读取 Excel 需要安装 openpyxl，请安装后重试') from ie
+                    else:
+                        df = pd.read_csv(str(target_path))
+                except Exception as read_err:
+                    execute_query("UPDATE upload_history SET status='failed', message=%s WHERE id=%s", [f'读取文件失败: {read_err}', up_id])
+                    saved.append({
+                        'filename': fname,
+                        'uploadTime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'fileSize': format_file_size_safe(os.path.getsize(target_path)),
+                        'status': 'failed'
+                    })
+                    continue
+
+                # 空文件则仅记录信息
+                if df is None or df.empty:
+                    execute_query("UPDATE upload_history SET message=%s WHERE id=%s", [f'文件无数据，未创建数据表', up_id])
+                else:
+                    # 基于原始文件名推断表名
+                    base = os.path.splitext(fname)[0]
+                    # 按用户要求：数据库表名不修改（保留中文、大小写和空格），仅做最小安全处理
+                    table_name = _preserve_table_name(base)
+                    # 列名去重与安全化
+                    used_names = set()
+                    name_map = {}
+                    ordered_new_cols = []
+                    cols_sql = []
+                    pk = None
+                    for idx, col in enumerate(list(df.columns)):
+                        # 处理缺失/空白/NaN 列名优先生成中文占位名，尽量保留原始中文
+                        base_name = _clean_column_name(col)
+                        if base_name in ('', 'nan', 'none'):
+                            base_name = f"列{idx+1}"
+                        # 去重：如重复则追加后缀 _2, _3...
+                        unique = base_name
+                        suffix = 2
+                        while unique in used_names:
+                            unique = f"{base_name}_{suffix}"
+                            suffix += 1
+                        used_names.add(unique)
+                        name_map[col] = unique
+                        ordered_new_cols.append(unique)
+
+                        # 类型推断
+                        series = df[col]
+                        if unique == 'id' and pd.api.types.is_integer_dtype(series):
+                            col_type = 'BIGINT'
+                            pk = 'id'
+                        else:
+                            col_type = _infer_mysql_type(series)
+                        # SQL 引用使用反引号包裹（列名中不包含反引号）
+                        cols_sql.append(f"`{unique}` {col_type}")
+                    if pk:
+                        cols_sql = [c.replace('`id` BIGINT', '`id` BIGINT AUTO_INCREMENT') if c.startswith('`id` BIGINT') else c for c in cols_sql]
+                        cols_sql.append("PRIMARY KEY (`id`)")
+                    create_sql = (
+                        f"CREATE TABLE IF NOT EXISTS `{table_name}` (" + ", ".join(cols_sql) + ") "
+                        "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
+                    )
+                    try:
+                        execute_query(create_sql)
+                    except Exception as ce:
+                        execute_query("UPDATE upload_history SET status='failed', message=%s WHERE id=%s", [f'创建数据表失败: {ce}', up_id])
+                        saved.append({
+                            'filename': fname,
+                            'uploadTime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'fileSize': format_file_size_safe(os.path.getsize(target_path)),
+                            'status': 'failed'
+                        })
+                        continue
+
+                    # 插入数据
+                    try:
+                        # 使用与建表一致的唯一列名（按位置设置，解决 NaN 列名无法通过 dict 匹配的问题）
+                        df2 = df.copy()
+                        try:
+                            df2.columns = ordered_new_cols
+                        except Exception:
+                            # 兜底：若列数不一致，回退逐列赋值
+                            cols_tmp = list(df2.columns)
+                            for i in range(min(len(cols_tmp), len(ordered_new_cols))):
+                                cols_tmp[i] = ordered_new_cols[i]
+                            df2.columns = cols_tmp
+                        records = df2.where(pd.notnull(df2), None).to_dict(orient='records')
+                        if records:
+                            cols_safe = list(df2.columns)
+                            placeholders = ",".join(["%s"] * len(cols_safe))
+                            insert_sql = f"INSERT INTO `{table_name}` (" + ",".join([f"`{c}`" for c in cols_safe]) + f") VALUES ({placeholders})"
+                            params = [tuple(rec.get(c) for c in cols_safe) for rec in records]
+                            execute_many(insert_sql, params)
+
+                        # 维护列名映射：先清空再写入
+                        try:
+                            execute_query("DELETE FROM table_column_mapping WHERE table_name=%s", [table_name])
+                            mapping_rows = []
+                            for idx, orig_col in enumerate(list(df.columns)):
+                                # 原始列名转字符串；NaN/None 处理为空串
+                                try:
+                                    orig_str = '' if pd.isna(orig_col) else str(orig_col)
+                                except Exception:
+                                    orig_str = str(orig_col) if orig_col is not None else ''
+                                stored = ordered_new_cols[idx] if idx < len(ordered_new_cols) else f"col_{idx+1}"
+                                display = orig_str or stored
+                                mapping_rows.append((table_name, idx+1, stored, orig_str, display))
+                            execute_many(
+                                "INSERT INTO table_column_mapping (table_name, column_order, stored_name, original_name, display_name) VALUES (%s,%s,%s,%s,%s)",
+                                mapping_rows
+                            )
+                            # 清理缓存的列标签
+                            try:
+                                if table_name in (global_data.get('column_labels') or {}):
+                                    del global_data['column_labels'][table_name]
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
+                        # 标记缓存脏并自动注册数据源（若未存在）
+                        try:
+                            mark_table_dirty(table_name)
+                        except Exception:
+                            pass
+                        try:
+                            ds_name = f"{table_name} 表"
+                            exist = fetch_one("SELECT id FROM data_sources WHERE name=%s", [ds_name])
+                            if not exist:
+                                cols_exist = set(get_columns(table_name) or [])
+                                cfg = { 'table': table_name }
+                                if 'updated_at' in cols_exist:
+                                    cfg['updated_at_column'] = 'updated_at'
+                                elif 'id' in cols_exist:
+                                    cfg['key_column'] = 'id'
+                                execute_query(
+                                    "INSERT INTO data_sources (name, type, config, active) VALUES (%s,%s,%s,%s)",
+                                    [ds_name, '数据库表', json.dumps(cfg, ensure_ascii=False), 1]
+                                )
+                        except Exception:
+                            pass
+
+                        execute_query("UPDATE upload_history SET message=%s WHERE id=%s", [f'表 `{table_name}` 已创建/更新', up_id])
+                    except Exception as ie:
+                        execute_query("UPDATE upload_history SET status='failed', message=%s WHERE id=%s", [f'插入数据失败: {ie}', up_id])
+                        saved.append({
+                            'filename': fname,
+                            'uploadTime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'fileSize': format_file_size_safe(os.path.getsize(target_path)),
+                            'status': 'failed'
+                        })
+                        continue
 
                 saved.append({
                     'filename': fname,
@@ -2348,37 +2574,45 @@ def uploads_endpoint():
 
 @analysis_bp.route('/data-sources', methods=['GET', 'POST'])
 def data_sources_endpoint():
-    """数据源列表与创建
-
-    GET:
-    - 默认仅返回已保存的数据源记录（避免一次性返回所有数据库表）
-    - 当 includeDefaults=1 时，若数据库为空，则基于真实表构造默认数据（不落库）
-    - 可选参数 onlySaved=1 强制仅返回已保存的数据
-    POST:
-    - 新增数据源记录
-    """
+    """GET: 列出数据源（优先数据库记录，若为空则基于真实表构造默认数据）; POST: 新增数据源。"""
     try:
         ensure_management_tables()
 
         if request.method == 'GET':
-            only_saved = str(request.args.get('onlySaved', '')).lower() in ('1', 'true', 'yes')
-            include_defaults = str(request.args.get('includeDefaults', '')).lower() in ('1', 'true', 'yes')
             rows = fetch_all(
                 "SELECT id, name, type, config, active, last_collection, created_at FROM data_sources ORDER BY id DESC"
             ) or []
-            if not rows and include_defaults and not only_saved:
-                # 基于数据库真实表构造默认数据（不落库，仅返回）
+            if not rows:
+                # 不返回临时项：当数据源为空时，基于真实表一次性创建正式数据源记录
                 tables = get_tables() or []
-                defaults = []
-                for i, t in enumerate(tables, start=1):
-                    defaults.append({
-                        'id': -i,  # 负ID表示临时数据
-                        'name': f'{t} 表',
-                        'type': '数据库表',
-                        'active': True,
-                        'lastCollection': None
-                    })
-                return jsonify({'status': 'success', 'data': defaults}), 200
+                management = {'data_sources', 'upload_history', 'collection_tasks', 'data_sync_state', 'table_column_mapping'}
+                created = 0
+                for t in tables:
+                    if t in management:
+                        continue
+                    try:
+                        cfg = { 'table': t }
+                        try:
+                            cols = set(get_columns(t) or [])
+                        except Exception:
+                            cols = set()
+                        # 常见增量列优先 updated_at 其后 id
+                        if 'updated_at' in cols:
+                            cfg['updated_at_column'] = 'updated_at'
+                        elif 'id' in cols:
+                            cfg['key_column'] = 'id'
+                        execute_query(
+                            "INSERT INTO data_sources (name, type, config, active) VALUES (%s,%s,%s,%s)",
+                            [f"{t} 表", '数据库表', json.dumps(cfg, ensure_ascii=False), 1]
+                        )
+                        created += 1
+                    except Exception as _e:
+                        # 单表失败不影响整体
+                        pass
+                # 重新查询并返回
+                rows = fetch_all(
+                    "SELECT id, name, type, config, active, last_collection, created_at FROM data_sources ORDER BY id DESC"
+                ) or []
 
             data = []
             for r in rows:
@@ -2412,41 +2646,94 @@ def data_sources_endpoint():
         return jsonify({'status': 'error', 'message': f'数据源处理失败: {str(e)}'}), 500
 
 
-@analysis_bp.route('/data-sources/<int:source_id>', methods=['PUT', 'PATCH', 'DELETE'])
-def data_source_detail(source_id: int):
-    """数据源详情：更新或删除
-    - PUT/PATCH: 更新 name/type/config/active
-    - DELETE: 删除记录
-    """
+@analysis_bp.route('/data-sources/<int:source_id>', methods=['GET', 'PUT', 'DELETE'])
+def data_source_item(source_id: int):
+    """单个数据源：GET 获取（含 config）；PUT 更新；DELETE 删除。"""
     try:
         ensure_management_tables()
+
+        # 内置临时数据源（负ID）不支持此端点
+        if source_id <= 0:
+            return jsonify({'status': 'error', 'message': '该数据源不可编辑，请先创建正式数据源'}), 400
+
+        if request.method == 'GET':
+            row = fetch_one(
+                "SELECT id, name, type, config, active, last_collection, created_at, updated_at FROM data_sources WHERE id=%s",
+                [source_id]
+            )
+            if not row:
+                return jsonify({'status': 'error', 'message': '数据源不存在'}), 404
+            data = {
+                'id': row.get('id'),
+                'name': row.get('name'),
+                'type': row.get('type'),
+                'config': row.get('config'),
+                'active': bool(row.get('active', 1)),
+                'lastCollection': str(row.get('last_collection')) if row.get('last_collection') else None,
+                'createdAt': str(row.get('created_at')) if row.get('created_at') else None,
+                'updatedAt': str(row.get('updated_at')) if row.get('updated_at') else None,
+            }
+            return jsonify({'status': 'success', 'data': data}), 200
+
+        if request.method == 'PUT':
+            payload = request.get_json(silent=True) or {}
+            name = payload.get('name')
+            dtype = payload.get('type')
+            config = payload.get('config', '')
+            active = 1 if payload.get('active', True) else 0
+
+            # 简单校验
+            if not name or not dtype:
+                return jsonify({'status': 'error', 'message': 'name 与 type 为必填'}), 400
+
+            # 执行更新
+            execute_query(
+                "UPDATE data_sources SET name=%s, type=%s, config=%s, active=%s, updated_at=NOW() WHERE id=%s",
+                [name, dtype, config, active, source_id]
+            )
+            return jsonify({'status': 'success', 'message': '更新成功'}), 200
+
         if request.method == 'DELETE':
             execute_query("DELETE FROM data_sources WHERE id=%s", [source_id])
-            return jsonify({'status': 'success', 'message': '已删除'}), 200
+            return jsonify({'status': 'success', 'message': '删除成功'}), 200
 
-        payload = request.get_json(silent=True) or {}
-        fields = []
-        values = []
-        for key in ('name', 'type', 'config', 'active', 'last_collection'):
-            if key in payload:
-                fields.append(f"{key}=%s")
-                # active 布尔转 0/1
-                val = payload[key]
-                if key == 'active':
-                    val = 1 if (val in (True, 1, '1', 'true', 'True')) else 0
-                values.append(val)
-        if not fields:
-            return jsonify({'status': 'error', 'message': '无可更新字段'}), 400
-        values.append(source_id)
-        sql = f"UPDATE data_sources SET {', '.join(fields)}, updated_at=NOW() WHERE id=%s"
-        execute_query(sql, values)
-        return jsonify({'status': 'success', 'message': '已更新'}), 200
+        return jsonify({'status': 'error', 'message': '不支持的请求方法'}), 405
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
-        return jsonify({'status': 'error', 'message': f'更新数据源失败: {str(e)}'}), 500
+        return jsonify({'status': 'error', 'message': f'数据源操作失败: {str(e)}'}), 500
 
 
-@analysis_bp.route('/collection-tasks', methods=['GET', 'POST'])
+@analysis_bp.route('/data-sources/<int:source_id>/collect', methods=['POST'])
+def collect_now(source_id: int):
+    """立即对某个数据源执行一次采集并刷新缓存。"""
+    try:
+        ensure_management_tables()
+        if source_id <= 0:
+            return jsonify({'status': 'error', 'message': '该数据源不可采集'}), 400
+        row = fetch_one("SELECT id, name, config FROM data_sources WHERE id=%s", [source_id])
+        if not row:
+            return jsonify({'status': 'error', 'message': '数据源不存在'}), 404
+        name = row.get('name')
+        cfg = row.get('config') or '{}'
+        try:
+            import json
+            cfg_obj = json.loads(cfg) if cfg.strip().startswith('{') else {}
+        except Exception:
+            cfg_obj = {}
+        # 直接调用采集一次
+        try:
+            from services.collector import DataCollector
+            DataCollector.instance()._collect_once(source_id, cfg_obj, name)
+        except Exception as e:
+            print(f"[CollectNow] 执行失败: {e}")
+            return jsonify({'status': 'error', 'message': f'采集执行失败: {str(e)}'}), 500
+        return jsonify({'status': 'success', 'message': '采集完成'}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': f'立即采集失败: {str(e)}'}), 500
+
+
+@analysis_bp.route('/collection-tasks', methods=['GET', 'POST', 'DELETE'])
 def collection_tasks_endpoint():
     """GET: 列出采集任务; POST: 创建采集任务（状态 running, 进度 0）。"""
     try:
@@ -2469,79 +2756,31 @@ def collection_tasks_endpoint():
                 })
             return jsonify({'status': 'success', 'data': data}), 200
 
-        # POST 创建
-        payload = request.get_json(silent=True) or {}
-        source_id = payload.get('source_id')
-        source_name = payload.get('source_name')
-        name = payload.get('name')
-        if not name and source_name:
-            name = f"{source_name}数据采集"
-        if not name:
-            name = '数据采集任务'
+        elif request.method == 'POST':
+            # 创建任务
+            payload = request.get_json(silent=True) or {}
+            source_id = payload.get('source_id')
+            source_name = payload.get('source_name')
+            name = payload.get('name')
+            if not name and source_name:
+                name = f"{source_name}数据采集"
+            if not name:
+                name = '数据采集任务'
 
-        execute_query(
-            "INSERT INTO collection_tasks (name, source_id, source_name, status, progress) VALUES (%s, %s, %s, %s, %s)",
-            [name, source_id, source_name, 'running', 0]
-        )
-        # 简化：取最新一条记录的ID（在低并发场景下可接受）
-        try:
-            from database import fetch_one as _fetch_one
-            row = _fetch_one("SELECT id FROM collection_tasks ORDER BY id DESC LIMIT 1")
-            new_id = row and row.get('id')
-        except Exception:
-            new_id = None
-        return jsonify({'status': 'success', 'message': '任务已创建', 'data': {'id': new_id}}), 201
+            new_id = execute_insert_return_id(
+                "INSERT INTO collection_tasks (name, source_id, source_name, status, progress) VALUES (%s, %s, %s, %s, %s)",
+                [name, source_id, source_name, 'running', 0]
+            )
+            return jsonify({'status': 'success', 'message': '任务已创建', 'id': new_id}), 201
+
+        elif request.method == 'DELETE':
+            # 清空任务历史
+            execute_query("DELETE FROM collection_tasks")
+            return jsonify({'status': 'success', 'message': '已清空任务列表'}), 200
 
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
         return jsonify({'status': 'error', 'message': f'采集任务处理失败: {str(e)}'}), 500
-
-
-@analysis_bp.route('/collection-tasks/<int:task_id>', methods=['PATCH'])
-def update_collection_task(task_id: int):
-    """更新采集任务状态或进度。
-    支持字段：status(running/completed/failed/cancelled)、progress(0-100)
-    当状态更新为 completed 时，若任务关联了 source_id，则同步更新 data_sources.last_collection = NOW()
-    """
-    try:
-        ensure_management_tables()
-        payload = request.get_json(silent=True) or {}
-        status = payload.get('status')
-        progress = payload.get('progress')
-
-        sets = []
-        vals = []
-        if status:
-            sets.append("status=%s")
-            vals.append(status)
-        if progress is not None:
-            try:
-                p = max(0, min(100, int(progress)))
-            except Exception:
-                p = 0
-            sets.append("progress=%s")
-            vals.append(p)
-        if not sets:
-            return jsonify({'status': 'error', 'message': '无可更新字段'}), 400
-
-        vals.append(task_id)
-        execute_query(f"UPDATE collection_tasks SET {', '.join(sets)}, updated_at=NOW() WHERE id=%s", vals)
-
-        # 若完成，尝试更新数据源最后采集时间
-        if status == 'completed':
-            try:
-                from database import fetch_one as _fetch_one
-                row = _fetch_one("SELECT source_id FROM collection_tasks WHERE id=%s", (task_id,))
-                sid = row and row.get('source_id')
-                if sid:
-                    execute_query("UPDATE data_sources SET last_collection=NOW(), updated_at=NOW() WHERE id=%s", [sid])
-            except Exception:
-                pass
-
-        return jsonify({'status': 'success', 'message': '任务已更新'}), 200
-    except Exception as e:
-        traceback.print_exc(file=sys.stdout)
-        return jsonify({'status': 'error', 'message': f'更新任务失败: {str(e)}'}), 500
 
 
 @analysis_bp.route('/collection-tasks/<int:task_id>/cancel', methods=['POST'])
@@ -2557,6 +2796,37 @@ def cancel_collection_task(task_id: int):
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
         return jsonify({'status': 'error', 'message': f'取消失败: {str(e)}'}), 500
+
+
+@analysis_bp.route('/collection-tasks/<int:task_id>', methods=['PUT'])
+def update_collection_task(task_id: int):
+    """更新任务状态/进度。允许传入 status 与 progress。"""
+    try:
+        ensure_management_tables()
+        payload = request.get_json(silent=True) or {}
+        status = payload.get('status')
+        progress = payload.get('progress')
+        fields = []
+        params = []
+        if status is not None:
+            fields.append("status=%s")
+            params.append(status)
+        if progress is not None:
+            try:
+                progress = int(progress)
+            except Exception:
+                progress = 0
+            fields.append("progress=%s")
+            params.append(progress)
+        if not fields:
+            return jsonify({'status': 'error', 'message': '无可更新字段'}), 400
+        set_clause = ", ".join(fields) + ", updated_at=NOW()"
+        params.append(task_id)
+        execute_query(f"UPDATE collection_tasks SET {set_clause} WHERE id=%s", params)
+        return jsonify({'status': 'success', 'message': '已更新'}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': f'更新任务失败: {str(e)}'}), 500
 
 
 def format_file_size_safe(num_bytes: int) -> str:

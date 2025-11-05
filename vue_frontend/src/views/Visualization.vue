@@ -8,10 +8,15 @@
         <el-card class="control-panel" shadow="hover">
           <el-form :inline="true" size="small">
             <el-form-item label="数据表">
-              <el-select v-model="chartDataTable" placeholder="选择数据源" @change="loadChartData" style="width: 180px">
-                <el-option label="考试成绩表" value="exam_scores"></el-option>
-                <el-option label="历史成绩表" value="historical_grades"></el-option>
-                <el-option label="课堂表现表" value="class_performance"></el-option>
+              <el-select v-model="chartDataTable" placeholder="选择数据源" @change="loadChartData" style="width: 220px">
+                <el-option
+                  v-for="t in chartTables"
+                  :key="t"
+                  :label="getTableLabel(t)"
+                  :value="t"
+                >
+                  <span style="float:left">{{ getTableLabel(t) }}</span>
+                </el-option>
               </el-select>
             </el-form-item>
             <el-form-item label="学生ID" v-if="trendType === 'individual'">
@@ -107,7 +112,6 @@
                 :label="getTableLabel(table)"
                 :value="table">
                 <span style="float: left">{{ getTableLabel(table) }}</span>
-                <span style="float: right; color: #8492a6; font-size: 13px">{{ table }}</span>
               </el-option>
             </el-select>
             
@@ -294,6 +298,7 @@ export default {
       activeTab: 'charts',
       trendType: 'individual',  // 默认为个人成绩
       chartDataTable: 'exam_scores',  // 默认为考试成绩表
+      chartTables: [], // 图表可选表
       selectedStudentId: 1,  // 默认显示学生1的成绩
       
       // CRUD对话框
@@ -472,6 +477,7 @@ export default {
       this.initCharts()
       // 先加载数据表,获取有效的学生ID,然后再加载图表数据
       setTimeout(async () => {
+        await this.fetchChartTables()
         await this.fetchTableData()
         // 然后加载图表数据
         this.loadChartData()
@@ -686,7 +692,7 @@ export default {
       
       this.loading.distribution = true
       try {
-        const params = {}
+        const params = { table: this.chartDataTable }
         
         // 如果选择了学生ID，添加到参数中
         if (this.trendType === 'individual' && this.selectedStudentId) {
@@ -920,7 +926,7 @@ export default {
       this.loading.pie = true
       try {
         const params = { 
-          table: 'exam_scores'  // 饼图固定使用考试成绩表的score_level数据
+          table: this.chartDataTable  // 使用所选数据表
         }
         
         // 饼图始终使用全部学生数据，不传student_id参数
@@ -993,6 +999,23 @@ export default {
         ElMessage.error('加载饼图数据失败')
       } finally {
         this.loading.pie = false
+      }
+    },
+    // 加载可用于图表的数据表列表
+    async fetchChartTables() {
+      try {
+        const res = await axios.get('/api/analysis/tables')
+        if (res.data?.status === 'success') {
+          this.chartTables = res.data.tables || []
+          // 初始化默认选择
+          if (!this.chartTables.includes(this.chartDataTable)) {
+            if (this.chartTables.includes('exam_scores')) this.chartDataTable = 'exam_scores'
+            else if (this.chartTables.includes('historical_grades')) this.chartDataTable = 'historical_grades'
+            else if (this.chartTables.length > 0) this.chartDataTable = this.chartTables[0]
+          }
+        }
+      } catch (e) {
+        console.warn('加载表清单失败:', e)
       }
     },
 
@@ -1123,7 +1146,31 @@ export default {
     },
 
     getTableLabel(table) {
-      return this.tableConfig.tableLabels[table] || table
+      const map = this.tableConfig.tableLabels || {}
+      if (map[table]) return map[table]
+      if (/[^\x00-\x7F]/.test(String(table))) return table
+      return this.translateTableName(table)
+    },
+    translateTableName(name) {
+      const dict = {
+        'students': '学生', 'student': '学生',
+        'exam': '考试', 'exams': '考试',
+        'score': '成绩', 'scores': '成绩',
+        'class': '课堂', 'classes': '课堂',
+        'performance': '表现',
+        'historical': '历史', 'history': '历史',
+        'grade': '成绩', 'grades': '成绩',
+        'course': '课程', 'courses': '课程',
+        'teacher': '教师', 'teachers': '教师',
+        'type': '类型', 'types': '类型',
+        'record': '记录', 'records': '记录',
+        'upload': '上传', 'data': '数据', 'source': '来源', 'mapping': '映射',
+        'sync': '同步', 'state': '状态', 'status': '状态'
+      }
+      const parts = String(name).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+      const cn = parts.map(p => dict[p]).filter(Boolean)
+      if (cn.length) return cn.join('') + '表'
+      return '自定义表'
     },
 
     getColumnWidth(prop) {

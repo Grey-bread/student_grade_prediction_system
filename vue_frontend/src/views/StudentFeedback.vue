@@ -16,6 +16,13 @@
         <el-form-item label="姓名">
           <el-input v-model="query.studentName" placeholder="可输入姓名查询" style="width: 180px;" @change="onQueryChange" />
         </el-form-item>
+        <el-form-item label="成绩表">
+          <el-select v-model="selectedGradesTable" placeholder="选择用于分析的成绩表" clearable style="width: 240px;">
+            <el-option v-for="t in availableTables" :key="t" :label="getTableDisplayName(t)" :value="t">
+              <span>{{ getTableDisplayName(t) }}</span>
+            </el-option>
+          </el-select>
+        </el-form-item>
         <el-form-item label="课程">
           <el-select v-model="query.courseId" placeholder="该生参与过的课程" clearable style="width: 240px;">
             <el-option v-for="c in courseOptions" :key="c.course_id" :label="`${c.course_name} (${c.course_id})`" :value="c.course_id" />
@@ -161,6 +168,8 @@ export default {
         studentName: '',
         courseId: null
       },
+      availableTables: [],
+      selectedGradesTable: '',
       feedback: null,
       courseOptions: [],
       perfItems: [
@@ -174,8 +183,61 @@ export default {
   },
   mounted() {
     // 初始不加载课程，待输入学号或姓名后联动加载
+    this.fetchTables()
   },
   methods: {
+    getTableDisplayName(name) {
+      const map = {
+        students: '学生信息表',
+        historical_grades: '历史成绩表',
+        exam_scores: '考试成绩表',
+        class_performance: '课堂表现表',
+        courses: '课程信息表',
+        exam_types: '考试类型表',
+        upload_history: '上传历史',
+        data_sources: '数据源',
+        collection_tasks: '采集任务',
+        table_column_mapping: '列名映射',
+        data_sync_state: '数据同步状态'
+      }
+      if (map[name]) return map[name]
+      if (/[^\x00-\x7F]/.test(String(name))) return name
+      return this.translateTableName(name)
+    },
+    translateTableName(name) {
+      const dict = {
+        'students': '学生', 'student': '学生',
+        'exam': '考试', 'exams': '考试',
+        'score': '成绩', 'scores': '成绩',
+        'class': '课堂', 'classes': '课堂',
+        'performance': '表现',
+        'historical': '历史', 'history': '历史',
+        'grade': '成绩', 'grades': '成绩',
+        'course': '课程', 'courses': '课程',
+        'teacher': '教师', 'teachers': '教师',
+        'type': '类型', 'types': '类型',
+        'record': '记录', 'records': '记录',
+        'upload': '上传', 'data': '数据', 'source': '来源', 'mapping': '映射',
+        'sync': '同步', 'state': '状态', 'status': '状态'
+      }
+      const parts = String(name).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+      const cn = parts.map(p => dict[p]).filter(Boolean)
+      if (cn.length) return cn.join('') + '表'
+      return '自定义表'
+    },
+    async fetchTables() {
+      try {
+        const res = await axios.get('/api/analysis/tables')
+        if (res.data?.status === 'success') {
+          this.availableTables = res.data.tables || []
+          if (!this.selectedGradesTable) {
+            if (this.availableTables.includes('historical_grades')) this.selectedGradesTable = 'historical_grades'
+          }
+        }
+      } catch (e) {
+        console.warn('获取表清单失败', e)
+      }
+    },
     async loadCourses() {
       try {
         const res = await axios.get('/api/analysis/student-courses', {
@@ -218,7 +280,8 @@ export default {
         const res = await axios.get('/api/analysis/student-feedback', {
           params: {
             student_id: this.query.studentId,
-            course_id: this.query.courseId || undefined
+            course_id: this.query.courseId || undefined,
+            grades_table: this.selectedGradesTable || undefined
           }
         })
         if (res.data?.status === 'success') {
