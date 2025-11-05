@@ -521,10 +521,41 @@ export default {
 
     handleTabChange(tabName) {
       if (tabName === 'charts') {
+        // 重新初始化图表以避免隐藏/显示导致的实例失效或残留配置
         this.$nextTick(() => {
+          try {
+            // 安全地销毁旧实例
+            Object.keys(this.charts).forEach(key => {
+              if (this.charts[key]) {
+                this.charts[key].dispose()
+                this.charts[key] = null
+              }
+            })
+            // 重新创建实例（仅当对应容器存在）
+            if (this.$refs.trendChart) this.charts.trend = echarts.init(this.$refs.trendChart)
+            if (this.$refs.distributionChart) this.charts.distribution = echarts.init(this.$refs.distributionChart)
+            if (this.$refs.progressChart) this.charts.progress = echarts.init(this.$refs.progressChart)
+            if (this.$refs.radarChart) this.charts.radar = echarts.init(this.$refs.radarChart)
+            if (this.$refs.pieChart) this.charts.pie = echarts.init(this.$refs.pieChart)
+          } catch (e) {
+            console.warn('图表重新初始化失败:', e)
+          }
+          // 重新加载数据并渲染
+          this.loadChartData()
           this.handleResize()
         })
       } else if (tabName === 'tables') {
+        // 离开图表页时主动销毁实例，防止后台渲染任务残留
+        try {
+          Object.keys(this.charts).forEach(key => {
+            if (this.charts[key]) {
+              this.charts[key].dispose()
+              this.charts[key] = null
+            }
+          })
+        } catch (e) {
+          console.warn('离开图表页 dispose 异常:', e)
+        }
         if (!this.tableConfig.tableData.length) {
           this.fetchTableData()
         }
@@ -599,15 +630,38 @@ export default {
               type: 'value',
               name: '分数'
             },
-            series: (response.data.series || []).map(s => ({
-              name: s?.name || '未知系列',
-              type: s?.type || 'line',
-              data: s?.data || [],
-              smooth: true
-            }))
+            series: (response.data.series || [])
+              .filter(s => s && typeof s === 'object')
+              .map(s => ({
+                name: s?.name || '未知系列',
+                type: typeof s?.type === 'string' ? s.type : 'line',
+                data: Array.isArray(s?.data) ? s.data.map(v => (typeof v === 'number' ? v : (isNaN(Number(v)) ? 0 : Number(v)))) : [],
+                smooth: true
+              }))
           }
+          // 最终兜底：若 series 为空或存在非对象项，使用占位系列避免 ECharts 内部读取 undefined.type
+          if (!Array.isArray(option.series) || option.series.length === 0) {
+            option.series = [{ name: '暂无数据', type: 'line', data: [] }]
+          } else {
+            option.series = option.series.filter(s => s && typeof s === 'object' && typeof s.type === 'string')
+            if (option.series.length === 0) {
+              option.series = [{ name: '暂无数据', type: 'line', data: [] }]
+            }
+          }
+          console.debug('趋势图 option.series 最终送入:', option.series)
           
-          this.charts.trend.setOption(option)
+          // 避免保留历史无效系列导致渲染异常
+          this.charts.trend.clear()
+          try {
+            this.charts.trend.setOption(option, true)
+          } catch (e) {
+            console.error('趋势图 setOption 异常，已回退为空系列:', e)
+            this.charts.trend.setOption({
+              xAxis: { type: 'category', data: [] },
+              yAxis: { type: 'value' },
+              series: [{ name: '暂无数据', type: 'line', data: [] }]
+            }, true)
+          }
         }
       } catch (error) {
         console.error('加载趋势数据失败:', error)

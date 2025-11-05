@@ -41,8 +41,8 @@ def train_model():
         target_column = data.get('targetColumn', 'total_score')
         test_size = float(data.get('testSize', 0.2))
         data_source = data.get('dataSource', 'database')  # database 或 upload
-        
-        print(f"📊 开始训练模型 - 目标列: {target_column}, 测试集比例: {test_size}")
+
+        print(f"[TRAIN] 开始训练模型 - 目标列: {target_column}, 测试集比例: {test_size}")
         
         # 从数据库加载训练数据
         if data_source == 'database':
@@ -68,7 +68,7 @@ def train_model():
                 LIMIT 5000
             """
             
-            print("🔍 从数据库查询训练数据...")
+            print("[TRAIN] 从数据库查询训练数据...")
             rows = fetch_all(query)
             
             if not rows or len(rows) == 0:
@@ -79,8 +79,8 @@ def train_model():
             
             # 转换为DataFrame
             df = pd.DataFrame(rows)
-            print(f"✅ 成功加载 {len(df)} 条训练数据")
-            print(f"📋 数据列: {df.columns.tolist()}")
+            print(f"[OK] 成功加载 {len(df)} 条训练数据")
+            print(f"[INFO] 数据列: {df.columns.tolist()}")
             
         else:
             return jsonify({
@@ -98,22 +98,18 @@ def train_model():
         
         # 使用预测服务进行训练
         prediction_service = PredictionService()
-        
-        print("🤖 开始模型训练...")
+
+        print("[TRAIN] 开始模型训练...")
         result = prediction_service.train_predict(df, target_col=target_column, test_size=test_size)
-        
-    # 保存模型（示例关闭，如需保存请取消注释）
+
+        # 保存模型（示例关闭，如需保存请取消注释）
         model_filename = f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"
         model_path = os.path.join(MODEL_DIR, model_filename)
-        
-    # 注意：这里只是示例，实际需要保存训练好的模型
-        # with open(model_path, 'wb') as f:
-        #     pickle.dump(result['best_model'], f)
-        
-        print(f"✅ 模型训练完成")
-        print(f"📊 R² 分数: {result['metrics']['r2']:.4f}")
-        print(f"📊 MAE: {result['metrics']['mae']:.4f}")
-        print(f"📊 RMSE: {result['metrics']['rmse']:.4f}")
+
+        print(f"[OK] 模型训练完成")
+        print(f"[METRIC] R²: {result['metrics']['r2']:.4f}")
+        print(f"[METRIC] MAE: {result['metrics']['mae']:.4f}")
+        print(f"[METRIC] RMSE: {result['metrics']['rmse']:.4f}")
         
         # 返回训练结果
         return jsonify({
@@ -132,7 +128,7 @@ def train_model():
         }), 200
         
     except Exception as e:
-        print(f"❌ 训练失败: {str(e)}")
+        print(f"[ERR] 训练失败: {str(e)}")
         traceback.print_exc(file=sys.stdout)
         return jsonify({
             'status': 'error',

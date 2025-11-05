@@ -118,29 +118,29 @@ def get_teacher_info():
         # 获取Authorization header
         auth = request.headers.get('Authorization')
         if not auth:
-            print("❌ 错误: Authorization header 不存在")
+            print("[ERR] Authorization header 不存在")
             return jsonify({'status':'error','message':'未授权访问，请重新登录'}), 401
         
         if not auth.startswith('Bearer '):
-            print(f"❌ 错误: Authorization header 格式不正确: {auth[:20]}...")
+            print(f"[ERR] Authorization header 格式不正确: {auth[:20]}...")
             return jsonify({'status':'error','message':'未授权访问，请重新登录'}), 401
         
         # 验证token
         token = auth.split(' ', 1)[1]
-        print(f"🔍 收到token: {token[:20]}... (长度: {len(token)})")
+        print(f"[INFO] 收到token: {token[:20]}... (长度: {len(token)})")
         
         try:
             payload = verify_token(token)
             teacher_id = payload.get('sub')
-            print(f"✅ Token验证成功，用户ID: {teacher_id}")
+            print(f"[OK] Token验证成功，用户ID: {teacher_id}")
         except ValueError as ve:
             # Token验证失败（过期、无效等）
-            print(f"❌ Token验证失败: {str(ve)}")
+            print(f"[ERR] Token验证失败: {str(ve)}")
             traceback.print_exc()
             return jsonify({'status':'error','message':str(ve)}), 401
         except Exception as e:
             # 其他验证错误
-            print(f"❌ Token验证异常: {str(e)}")
+            print(f"[ERR] Token验证异常: {str(e)}")
             traceback.print_exc()
             return jsonify({'status':'error','message':'令牌验证失败，请重新登录'}), 401
         

@@ -467,8 +467,10 @@ html, body {
   align-items: center;
   width: 100%;
   min-height: 100vh;
-  background: linear-gradient(135deg, #409eff 0%, #66b1ff 100%);
-  padding: 20px;
+  /* 去除全局蓝色渐变，交由登录/注册页面自身背景接管 */
+  background: transparent !important;
+  background-color: transparent !important;
+  padding: 0;
   position: relative;
   overflow: hidden;
   margin: 0;
@@ -477,31 +479,9 @@ html, body {
 }
 
 /* 背景装饰元素 */
+/* 关闭全局伪元素，避免颜色干扰登录/注册自定义背景 */
 .auth-container::before,
-.auth-container::after {
-  content: '';
-  position: absolute;
-  border-radius: 50%;
-  z-index: 0;
-}
-
-.auth-container::before {
-  width: 400px;
-  height: 400px;
-  background: rgba(255, 255, 255, 0.1);
-  top: -100px;
-  right: -100px;
-  animation: float 15s ease-in-out infinite;
-}
-
-.auth-container::after {
-  width: 300px;
-  height: 300px;
-  background: rgba(255, 255, 255, 0.05);
-  bottom: -100px;
-  left: -100px;
-  animation: float 10s ease-in-out infinite reverse;
-}
+.auth-container::after { display: none !important; }
 
 /* 浮动动画 */
 @keyframes float {

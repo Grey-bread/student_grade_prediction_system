@@ -1,6 +1,25 @@
 <template>
   <div class="auth-container">
-    <div class="register-box">
+    <!-- 背景层：支持渐变或自定义上传图片 -->
+    <div class="auth-bg" :style="bgStyle"></div>
+    <div class="auth-bg-overlay"></div>
+
+    <!-- 背景设置控件 -->
+    <div class="auth-tools">
+      <input ref="bgInput" type="file" accept="image/*" class="bg-file-input" @change="onBgSelected" />
+      <el-tooltip content="上传背景图片" placement="bottom">
+        <el-button size="small" circle class="bg-tool-btn" @click="triggerBgUpload">
+          <el-icon><Picture /></el-icon>
+        </el-button>
+      </el-tooltip>
+      <el-tooltip content="恢复默认背景" placement="bottom">
+        <el-button size="small" circle class="bg-tool-btn" @click="resetBg">
+          <el-icon><Refresh /></el-icon>
+        </el-button>
+      </el-tooltip>
+    </div>
+
+    <div class="register-box glass-card">
       <el-form
         ref="regForm"
         :model="form"
@@ -64,12 +83,12 @@
 
 <script>
 import axios from 'axios'
-import { User, Lock, Phone, Message } from '@element-plus/icons-vue'
+import { User, Lock, Phone, Message, Picture, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
 export default {
   name: 'Register',
-  components: { User, Lock, Phone, Message },
+  components: { User, Lock, Phone, Message, Picture, Refresh },
   data() {
     const validatePassword = (rule, value, callback) => {
       if (!value) return callback(new Error('请输入密码'))
@@ -102,6 +121,7 @@ export default {
     }
 
     return {
+      bgImage: localStorage.getItem('authBgImage') || '',
       form: {
         username: this.$route.query.username || '',
         password: '',
@@ -125,7 +145,43 @@ export default {
       }
     }
   },
+  computed: {
+    bgStyle() {
+      if (this.bgImage) {
+        return {
+          backgroundImage: `url(${this.bgImage})`,
+          backgroundSize: 'cover',
+          backgroundPosition: 'center center'
+        }
+      }
+      // 默认渐变背景（改为白色系，避免切换时出现蓝色闪烁，并呈现白色过渡）
+      return { backgroundImage: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 50%, #ffffff 100%)' }
+    }
+  },
   methods: {
+    triggerBgUpload() { this.$refs.bgInput && this.$refs.bgInput.click() },
+    onBgSelected(e) {
+      const file = e?.target?.files?.[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        try {
+          const dataUrl = reader.result
+          this.bgImage = dataUrl
+          localStorage.setItem('authBgImage', dataUrl)
+          ElMessage.success('背景已更新')
+        } catch (err) {
+          ElMessage.error('设置背景失败')
+        }
+      }
+      reader.readAsDataURL(file)
+      e.target.value = ''
+    },
+    resetBg() {
+      this.bgImage = ''
+      localStorage.removeItem('authBgImage')
+      ElMessage.success('已恢复默认背景')
+    },
     async submit(e) {
       e && e.preventDefault()
       if (this.loading) return
@@ -160,122 +216,91 @@ export default {
 </script>
 
 <style scoped>
-/* 注册容器样式，使用与主界面一致的风格 */
-.register-box {
+/* 布局与背景 */
+.auth-container { position: relative; min-height: 100vh; display: flex; justify-content: center; align-items: center; overflow: hidden; background-color: #ffffff; }
+.auth-bg { position: fixed; inset: 0; background-size: cover; background-position: center; background-repeat: no-repeat; filter: brightness(0.95); transition: background-image 0.3s ease; }
+.auth-bg-overlay { position: fixed; inset: 0; background: linear-gradient(to bottom right, rgba(0,0,0,0.2), rgba(0,0,0,0.35)); pointer-events: none; }
+.auth-tools { position: absolute; top: 16px; right: 16px; display: flex; gap: 8px; z-index: 3; }
+.bg-file-input { display: none; }
+
+/* 玻璃拟态卡片 */
+.glass-card {
   width: 100%;
-  max-width: 400px;
-  background-color: #fff;
-  border-radius: 12px;
-  padding: 40px 32px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+  max-width: 420px;
+  border-radius: 16px;
+  padding: 36px 28px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
   position: relative;
-  overflow: hidden;
-  z-index: 1;
-  backdrop-filter: blur(10px);
-  background: rgba(255, 255, 255, 0.95);
-  margin: 0 auto;
+  z-index: 2;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
-/* 注册表单样式 */
-.register-form {
-  width: 100%;
-}
+/* 表单与标题 */
+.register-form { width: 100%; }
+.register-header { text-align: center; margin-bottom: 20px; }
+.register-header h2 { font-size: 24px; font-weight: 700; color: #fff; letter-spacing: 1px; }
+.hint { font-size: 14px; color: rgba(255,255,255,0.85); margin: 6px 0 0; }
 
-.register-header {
-  text-align: center;
-  margin-bottom: 28px;
+/* 输入项优化 */
+.input-item { margin-bottom: 18px; }
+:deep(.el-input__wrapper) {
+  border-radius: 12px;
+  background: rgba(255,255,255,0.4) !important; /* 透明度调整为 0.4 */
+  border: 1px solid rgba(255,255,255,0.35) !important;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  box-shadow: none;
 }
-
-.register-header h2 {
-  font-size: 24px;
-  font-weight: 600;
-  color: #303133;
-  margin-bottom: 8px;
-}
-
-.hint {
-  font-size: 14px;
-  color: #606266;
-  margin: 0;
-}
-
-/* 输入项样式 */
-.input-item {
-  margin-bottom: 20px;
-}
-
-.input-item .el-input {
-  width: 100%;
-}
-
-.input-item .el-input__wrapper {
-  border-radius: 8px;
-  transition: all 0.3s ease;
-}
-
-.input-item .el-input__wrapper:hover {
-  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.1);
-}
-
-.input-item .el-input__wrapper.is-focus {
-  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.2);
-}
+:deep(.el-input__wrapper.is-focus) { box-shadow: 0 0 0 3px rgba(64,158,255,0.25); }
+:deep(.el-input__inner) { background-color: transparent !important; color: #0f172a; }
+:deep(.el-input__inner::placeholder) { color: rgba(15,23,42,0.5); }
+:deep(.el-input__prefix) { color: rgba(15,23,42,0.65); }
 
 /* 注册按钮 */
+.register-btn { width: 100%; height: 44px; border-radius: 12px; font-size: 16px; font-weight: 600; letter-spacing: 1px; }
+/* 让主按钮呈现半透明玻璃效果 */
 .register-btn {
-  width: 100%;
-  height: 40px;
-  border-radius: 8px;
-  font-size: 16px;
-  font-weight: 500;
-  background-color: #409eff;
-  border-color: #409eff;
-  transition: all 0.3s ease;
+  background: rgba(255,255,255,0.25) !important;
+  border-color: rgba(255,255,255,0.4) !important;
+  color: #ffffff !important;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
-
-.register-btn:hover {
-  background-color: #66b1ff;
-  border-color: #66b1ff;
-  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.3);
+.register-btn:hover,
+.register-btn:focus {
+  background: rgba(255,255,255,0.32) !important;
+  border-color: rgba(255,255,255,0.45) !important;
 }
-
+.register-btn.is-disabled,
 .register-btn.is-loading {
-  background-color: #409eff;
-  border-color: #409eff;
+  opacity: 0.8;
 }
 
-/* 登录链接 */
-.login-link {
-  text-align: center;
-  margin-top: 20px;
-  font-size: 14px;
+/* 顶部工具小圆按钮半透明 */
+.bg-tool-btn {
+  background: rgba(255,255,255,0.28) !important;
+  border-color: rgba(255,255,255,0.45) !important;
+  color: #ffffff !important;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.bg-tool-btn:hover,
+.bg-tool-btn:focus {
+  background: rgba(255,255,255,0.36) !important;
+  border-color: rgba(255,255,255,0.5) !important;
 }
 
-.login-link a {
-  color: #409eff;
-  text-decoration: none;
-  transition: color 0.3s ease;
-}
+/* 链接 */
+.login-link { text-align: center; margin-top: 14px; }
+.login-link a { color: #e0f2fe; }
+.login-link a:hover { color: #bae6fd; }
 
-.login-link a:hover {
-  color: #66b1ff;
-}
-
-/* 响应式设计 */
+/* 响应式 */
 @media (max-width: 768px) {
-  .register-box {
-    width: 90%;
-    max-width: 400px;
-    padding: 24px;
-    margin: 20px;
-  }
-  
-  .system-name {
-    font-size: 18px;
-  }
-  
-  .register-header h2 {
-    font-size: 20px;
-  }
+  .glass-card { max-width: 92%; padding: 24px 18px; margin: 16px; }
+  .register-header h2 { font-size: 20px; }
 }
 </style>

@@ -23,18 +23,19 @@ try:
     env_path = Path(__file__).parent / '.env'
     if env_path.exists():
         load_dotenv(dotenv_path=env_path, override=True)
-        print(f"✓ 已加载环境变量文件: {env_path}")
+        # 避免在部分 Windows 终端（GBK 编码）下因特殊符号导致编码错误
+        print(f"[OK] 已加载环境变量文件: {env_path}")
     else:
-        print(f"⚠ 警告: .env 文件不存在于 {env_path}")
+        print(f"[WARN] .env 文件不存在于 {env_path}")
         print("  请创建 .env 文件并配置数据库连接信息")
         # 尝试从项目根目录加载
         root_env_path = Path(__file__).parent.parent / '.env'
         if root_env_path.exists():
             load_dotenv(dotenv_path=root_env_path, override=True)
-            print(f"✓ 已从项目根目录加载环境变量文件: {root_env_path}")
+            print(f"[OK] 已从项目根目录加载环境变量文件: {root_env_path}")
 except ImportError:
     # 如果没有安装 python-dotenv，使用系统环境变量
-    print("⚠ 警告: python-dotenv 未安装，使用系统环境变量")
+    print("[WARN] python-dotenv 未安装，使用系统环境变量")
     print("  建议运行: pip install python-dotenv")
 
 
