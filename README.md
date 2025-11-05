@@ -199,7 +199,7 @@ npm run serve
 
 ---
 
-## 9. 生产部署建议（简要）
+## 9. 生产部署建议
 - 后端：使用 WSGI（gunicorn/uwsgi）+ Nginx，设置环境变量与服务化启动（如 NSSM/Windows 服务）。
 - 前端：打包 `npm run build`，将 `dist/` 上传到静态资源服务器或 Nginx。
 - 安全：配置 JWT 秘钥、数据库账号最小权限、限制上传文件类型与大小。
@@ -207,10 +207,4 @@ npm run serve
 
 ---
 
-## 10. 术语对照
-- 课堂表现雷达：attendance/participation/homework/behavior/total 等映射为中文名称，且自动去重。
-- CSV 回退：数据库不可用时，后端会自动读取 `database_datasets/*.csv` 提供分析数据。
 
----
-
-如需我把“导出为中文表头 CSV”、“统一 401 处理”、“数据导入带字段映射确认”等增强也一起补上，请告诉我你的偏好和优先级。
