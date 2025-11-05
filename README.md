@@ -19,7 +19,7 @@ flask_backend/              # Flask 后端
   app.py                    # 应用入口
   database.py               # MySQL 连接/CRUD 与 .env 加载
   requirements.txt          # 后端依赖
-  .env.example              # 环境变量示例（拷贝为 .env）
+  .env                      # 环境变量
   routes/                   # 业务接口
     analysis_routes.py      # 分析/统计/导出等接口
     teacher_routes.py       # 登录/注册/头像/教师面板
@@ -49,11 +49,11 @@ vue_frontend/               # Vue 前端
 # .\.venv\Scripts\Activate.ps1
 
 # 安装依赖
-cd "E:\Code\student_grade_system_complete - 副本\flask_backend"
+cd "E:\Code\student_grade_prediction_system\flask_backend"
 python -m pip install -r requirements.txt
 ```
 
-2) 配置环境变量（复制 `.env.example` 为 `.env` 并修改）
+2) 配置环境变量
 ```properties
 # flask_backend/.env 示例
 DB_HOST=127.0.0.1
@@ -72,7 +72,7 @@ python app.py
 
 ### 3.2 前端（Vue 3）
 ```powershell
-cd "E:\Code\student_grade_system_complete - 副本\vue_frontend"
+cd "E:\Code\student_grade_prediction_system\vue_frontend"
 npm install
 npm run serve
 ```
@@ -106,7 +106,7 @@ npm run serve
   - `GET /class-trends?table=...`：班级趋势
   - `GET /subject-comparison?table=...`：学科对比
   - `GET /student-progress?table=...&student_id=...`：进步曲线
-  - `GET /radar-data?table=class_performance&student_id=...`：课堂表现雷达（中文维度名，自动去重）
+  - `GET /radar-data?table=class_performance&student_id=...`：课堂表现雷达
   - `GET /grade-distribution?table=exam_scores`：等级分布饼图
   - `GET /table-data?table=...`：数据表数据（用于前端表格）
   - 导出：
@@ -199,7 +199,7 @@ npm run serve
 
 ---
 
-## 9. 生产部署建议（简要）
+## 9. 生产部署建议
 - 后端：使用 WSGI（gunicorn/uwsgi）+ Nginx，设置环境变量与服务化启动（如 NSSM/Windows 服务）。
 - 前端：打包 `npm run build`，将 `dist/` 上传到静态资源服务器或 Nginx。
 - 安全：配置 JWT 秘钥、数据库账号最小权限、限制上传文件类型与大小。
@@ -207,10 +207,4 @@ npm run serve
 
 ---
 
-## 10. 术语对照
-- 课堂表现雷达：attendance/participation/homework/behavior/total 等映射为中文名称，且自动去重。
-- CSV 回退：数据库不可用时，后端会自动读取 `database_datasets/*.csv` 提供分析数据。
 
----
-
-如需我把“导出为中文表头 CSV”、“统一 401 处理”、“数据导入带字段映射确认”等增强也一起补上，请告诉我你的偏好和优先级。
