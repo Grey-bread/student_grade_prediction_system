@@ -556,6 +556,7 @@ export default {
       // 先加载数据表,获取有效的学生ID,然后再加载图表数据
       setTimeout(async () => {
         await this.fetchChartTables()
+        await this.fetchCrudTables()
         await this.fetchTableData()
         // 然后加载图表数据
         this.loadChartData()
@@ -572,6 +573,35 @@ export default {
   },
 
   methods: {
+    // 加载“数据表可视化”页签的表清单：按列名识别的成绩表 + students
+    async fetchCrudTables() {
+      try {
+        const [gradeRes, allRes] = await Promise.allSettled([
+          axios.get('/api/analysis/grade-tables'),
+          axios.get('/api/analysis/tables')
+        ])
+        let gradeTables = []
+        if (gradeRes.status === 'fulfilled' && gradeRes.value?.data?.status === 'success') {
+          gradeTables = gradeRes.value.data.tables || []
+        }
+        let allTables = []
+        if (allRes.status === 'fulfilled' && allRes.value?.data?.status === 'success') {
+          allTables = allRes.value.data.tables || []
+        }
+        const set = new Set(gradeTables)
+        if (allTables.includes('students')) set.add('students')
+        this.tableConfig.tables = Array.from(set)
+        // 默认选择：优先 university_grades 其次其他成绩表 再 students
+        if (!this.tableConfig.selectedTable || !this.tableConfig.tables.includes(this.tableConfig.selectedTable)) {
+          if (this.tableConfig.tables.includes('university_grades')) this.tableConfig.selectedTable = 'university_grades'
+          else if (gradeTables.length > 0) this.tableConfig.selectedTable = gradeTables[0]
+          else if (this.tableConfig.tables.includes('students')) this.tableConfig.selectedTable = 'students'
+          else if (this.tableConfig.tables.length > 0) this.tableConfig.selectedTable = this.tableConfig.tables[0]
+        }
+      } catch (e) {
+        console.warn('加载 CRUD 表清单失败:', e)
+      }
+    },
     async preloadDistinctOptions(props = []) {
       try {
         const table = this.tableConfig.selectedTable
@@ -763,7 +793,12 @@ export default {
     async loadStudentDetail() {
       try {
         if (!this.selectedStudentId) return
-        const res = await axios.get('/api/analysis/student-detail', { params: { student_id: this.selectedStudentId } })
+        const res = await axios.get('/api/analysis/student-detail', {
+          params: {
+            student_id: this.selectedStudentId,
+            table: this.chartDataTable
+          }
+        })
         if (res.data?.status === 'success') {
           this.studentDetail = {
             profile: res.data.profile || null,
@@ -800,16 +835,21 @@ export default {
       }
     },
 
-    // 趋势标题已移除
 
     async updateDistributionChart() {
       if (!this.charts.distribution) return
       this.loading.distribution = true
       try {
-        if (this.chartDataTable === 'university_grades') {
+        // 动态根据当前表名请求
+        if (this.chartDataTable && this.chartDataTable !== 'students') {
+          // 通用成绩表分布接口（如有）
           const params = { buckets: 5, table: this.chartDataTable }
           if (this.selectedStudentId) params.student_id = this.selectedStudentId
-          const res = await axios.get('/api/analysis/ug/calculus-by-factors-bucket', { params })
+          // 兼容原有 university_grades 特例
+          const url = this.chartDataTable === 'university_grades'
+            ? '/api/analysis/ug/calculus-by-factors-bucket'
+            : '/api/analysis/ug/calculus-by-factors-bucket'
+          const res = await axios.get(url, { params })
           const series = (res.data?.series || []).map(s => ({ name: s.name, type: 'line', data: s.data, smooth: true }))
           const option = {
             title: { text: '多因素对高数成绩的影响（分档：低→高）', left: 'center' },
@@ -935,8 +975,9 @@ export default {
       if (!this.charts.pie) return
       this.loading.pie = true
       try {
-        if (this.chartDataTable === 'university_grades') {
-          const response = await axios.get('/api/analysis/score-band-distribution', { params: { table: 'university_grades' } })
+        // 动态根据当前表名请求
+        if (this.chartDataTable && this.chartDataTable !== 'students') {
+          const response = await axios.get('/api/analysis/score-band-distribution', { params: { table: this.chartDataTable } })
           if (response.data.status === 'success') {
             const pieData = response.data.data || []
             const total = response.data.total || pieData.reduce((sum, item) => sum + (item.value || 0), 0)
@@ -1037,18 +1078,36 @@ export default {
     },
     // 加载可用于图表的数据表列表
     async fetchChartTables() {
+      // 优先使用按列名识别的“成绩表”，并额外保留 students 用于学生详情
       try {
-        const res = await axios.get('/api/analysis/tables')
-        if (res.data?.status === 'success') {
-          this.chartTables = (res.data.tables || []).filter(t => ['students','university_grades'].includes(t))
-          // 初始化默认选择，优先使用 university_grades
-          if (!this.chartTables.includes(this.chartDataTable)) {
-            if (this.chartTables.includes('university_grades')) this.chartDataTable = 'university_grades'
-            else if (this.chartTables.includes('students')) this.chartDataTable = 'students'
-            else if (this.chartTables.length > 0) this.chartDataTable = this.chartTables[0]
-          }
-          await this.fetchPredictColumns()
+        const [gradeRes, allRes] = await Promise.allSettled([
+          axios.get('/api/analysis/grade-tables'),
+          axios.get('/api/analysis/tables')
+        ])
+
+        let gradeTables = []
+        if (gradeRes.status === 'fulfilled' && gradeRes.value?.data?.status === 'success') {
+          gradeTables = gradeRes.value.data.tables || []
         }
+        let allTables = []
+        if (allRes.status === 'fulfilled' && allRes.value?.data?.status === 'success') {
+          allTables = allRes.value.data.tables || []
+        }
+
+        // 允许的图表数据源：优先成绩类表，同时保留 students（用于详情联动）
+        const set = new Set(gradeTables)
+        if (allTables.includes('students')) set.add('students')
+        this.chartTables = Array.from(set)
+
+        // 默认选择：优先 university_grades 其次其它成绩表，再 students
+        if (!this.chartTables.includes(this.chartDataTable)) {
+          if (this.chartTables.includes('university_grades')) this.chartDataTable = 'university_grades'
+          else if (gradeTables.length > 0) this.chartDataTable = gradeTables[0]
+          else if (this.chartTables.includes('students')) this.chartDataTable = 'students'
+          else if (this.chartTables.length > 0) this.chartDataTable = this.chartTables[0]
+        }
+
+        await this.fetchPredictColumns()
       } catch (e) {
         console.warn('加载表清单失败:', e)
       }
@@ -1067,7 +1126,6 @@ export default {
       
       try {
         console.log(`正在加载${this.tableConfig.selectedTable}表数据...`)
-        
         // 使用分页请求处理大数据量
         const response = await axios.get(`/api/analysis/table-data?table=${this.tableConfig.selectedTable}&page=1&page_size=1000`, {
           timeout: 15000, // 15秒超时
@@ -1076,12 +1134,24 @@ export default {
             'Content-Type': 'application/json'
           }
         })
-        
         console.log(`${this.tableConfig.selectedTable}表响应状态:`, response.status)
-        
         if (response.data && response.data.status === 'success') {
           this.tableConfig.tableData = response.data.data || []
           this.tableConfig.total = response.data.total || this.tableConfig.tableData.length
+          // 动态生成自定义表的列配置，优先用后端 columns 字段顺序
+          if (!this.tableConfig.tableConfigs[this.tableConfig.selectedTable]) {
+            const rows = this.tableConfig.tableData
+            // 优先用后端 columns 字段
+            const colOrder = Array.isArray(response.data.columns) && response.data.columns.length
+              ? response.data.columns
+              : (Array.isArray(rows) && rows.length > 0 ? Object.keys(rows[0]) : [])
+            const columns = colOrder.map(k => ({
+              prop: k,
+              label: this.translateColumnName ? this.translateColumnName(k) : k,
+              type: k.includes('score') ? 'score' : (k.includes('id') ? 'id' : 'text')
+            }))
+            this.tableConfig.tableConfigs[this.tableConfig.selectedTable] = { columns }
+          }
           console.log(`${this.tableConfig.selectedTable}表加载成功，显示${this.tableConfig.tableData.length}条记录，总共${this.tableConfig.total}条`)
         } else {
           const errorMsg = response.data?.message || '加载数据失败'
@@ -1090,7 +1160,6 @@ export default {
         }
       } catch (error) {
         console.error(`获取${this.tableConfig.selectedTable}表数据失败:`, error)
-        
         let errorMessage = '加载数据失败'
         if (error.code === 'ECONNABORTED') {
           errorMessage = '请求超时，数据量较大，请稍后重试'
@@ -1101,7 +1170,6 @@ export default {
         } else {
           errorMessage = error.message || '未知错误'
         }
-        
         this.tableConfig.error = errorMessage
       } finally {
         this.tableConfig.loading = false
@@ -1184,14 +1252,53 @@ export default {
       const map = this.tableConfig.tableLabels || {}
       if (map[table]) return map[table]
       if (/[^\x00-\x7F]/.test(String(table))) return table
+      // 纯数字或很短的原始名（如“1”、“1_2024”），直接显示原名，避免误显示“自定义表”
+      const s = String(table)
+      if (/^[0-9._-]+$/.test(s) || s.length <= 3) return s
       return this.translateTableName(table)
     },
     translateColumnName(col) {
       const map = {
-        total_score: '总成绩', final_score: '期末成绩', midterm_score: '期中成绩', usual_score: '平时成绩',
-        score: '分数', ranking: '排名',
-        calculus_score: '高等数学成绩', homework_score: '作业分数',
-        study_hours: '学习时长', attendance_count: '出勤次数', practice_count: '刷题数'
+        student_id: '学生ID',
+        student_no: '学号',
+        name: '姓名',
+        gender: '性别',
+        grade: '年级',
+        class: '班级',
+        birth_date: '出生日期',
+        contact_phone: '联系电话',
+        email: '邮箱',
+        total_score: '总成绩',
+        final_score: '期末成绩',
+        midterm_score: '期中成绩',
+        usual_score: '平时成绩',
+        score: '分数',
+        ranking: '排名',
+        calculus_score: '高等数学成绩',
+        calculus_avg_score: '高数平均',
+        first_calculus_score: '高数第一次',
+        second_calculus_score: '高数第二次',
+        third_calculus_score: '高数第三次',
+        homework_score: '作业分数',
+        study_hours: '学习时长',
+        attendance_count: '出勤次数',
+        practice_count: '刷题数',
+        performance_id: '表现ID',
+        course_id: '课程ID',
+        exam_type_id: '考试类型ID',
+        exam_name: '考试名称',
+        exam_date: '考试日期',
+        score_level: '成绩等级',
+        teacher_id: '教师ID',
+        comments: '评语',
+        behavior_score: '行为分数',
+        total_performance_score: '总表现分数',
+        teacher_comments: '教师评语',
+        grade_id: '成绩ID',
+        academic_year: '学年',
+        grade_level: '成绩等级',
+        performance: '表现',
+        // 兜底
       }
       return map[col] || col
     },
@@ -1214,7 +1321,8 @@ export default {
       const parts = String(name).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
       const cn = parts.map(p => dict[p]).filter(Boolean)
       if (cn.length) return cn.join('') + '表'
-      return '自定义表'
+      // 默认直接返回原始名称，避免误导
+      return String(name)
     },
 
     getColumnWidth(prop) {
@@ -1489,6 +1597,12 @@ export default {
   },
 
   watch: {
+    chartDataTable: {
+      handler() {
+        // 切换数据表时，自动刷新学生详情和所有图表
+        this.loadChartData()
+      }
+    },
     'tableConfig.selectedTable': {
       handler() {
         this.tableConfig.currentPage = 1

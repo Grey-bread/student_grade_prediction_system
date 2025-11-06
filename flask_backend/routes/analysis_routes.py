@@ -9,7 +9,6 @@
 - 表结构/特征名称/学科关键词等映射集中在顶部常量
 """
 
-# flask_backend/routes/analysis_routes.py
 from flask import Blueprint, request, jsonify
 from flask import Response, send_file
 import pandas as pd
@@ -32,6 +31,110 @@ analysis_bp = Blueprint('analysis_bp', __name__)
 global_data = {}
 global_data['dirty_tables'] = set()
 global_data['column_labels'] = {}
+
+# 计算可用数据表（DB + CSV）
+def _list_available_tables():
+    """Return a best-effort list of available tables from DB and CSV folder.
+
+    - Tries to read table names from MySQL if connector available.
+    - Also scans database_datasets folder for CSV files and includes their basenames.
+    """
+    tables = set()
+    # DB tables
+    try:
+        db_tables = get_tables() or []
+        for t in db_tables:
+            if t: tables.add(str(t))
+    except Exception:
+        pass
+    # CSV tables (fallback)
+    try:
+        base1 = Path(__file__).parent.parent / 'database_datasets'
+        base2 = Path(__file__).parent.parent.parent / 'database_datasets'
+        uploads_dir = Path(__file__).parent.parent / 'uploads'
+        for base in (base1, base2):
+            if base.exists() and base.is_dir():
+                for p in base.glob('*.csv'):
+                    name = p.stem
+                    if name:
+                        tables.add(name)
+        # 递归扫描 uploads 下的所有 csv
+        if uploads_dir.exists() and uploads_dir.is_dir():
+            for p in uploads_dir.rglob('*.csv'):
+                try:
+                    name = p.stem
+                    if name:
+                        tables.add(name)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return sorted(tables)
+
+
+def _get_table_columns_any(table_name: str):
+    """Best-effort to obtain column names for a table from DB or CSV header."""
+    # Try DB INFORMATION_SCHEMA
+    try:
+        cols = get_columns(table_name) or []
+        if cols:
+            return [str(c) for c in cols]
+    except Exception:
+        pass
+    # Fallback to CSV header
+    csv_candidates = [
+        Path(__file__).parent.parent / 'database_datasets' / f'{table_name}.csv',
+        Path(__file__).parent.parent.parent / 'database_datasets' / f'{table_name}.csv'
+    ]
+    # 在 uploads 目录中递归查找匹配文件名的 CSV
+    try:
+        uploads_dir = Path(__file__).parent.parent / 'uploads'
+        if uploads_dir.exists() and uploads_dir.is_dir():
+            for p in uploads_dir.rglob('*.csv'):
+                if p.stem == table_name:
+                    csv_candidates.insert(0, p)
+                    break
+    except Exception:
+        pass
+    for p in csv_candidates:
+        try:
+            if p.exists():
+                cols = _read_csv_header_with_fallbacks(p)
+                if cols is not None:
+                    return cols
+        except Exception:
+            continue
+    return []
+
+# 读取 CSV 表头，尝试多编码与分隔符自动嗅探
+def _read_csv_header_with_fallbacks(path: Path):
+    encodings = ['utf-8', 'utf-8-sig', 'gbk', 'cp936', 'latin1']
+    for enc in encodings:
+        try:
+            df = pd.read_csv(path, nrows=0, encoding=enc, sep=None, engine='python')
+            return [str(c) for c in df.columns.tolist()]
+        except Exception:
+            continue
+    return None
+
+# 读取完整 CSV，尝试多编码与分隔符自动嗅探
+def _read_csv_full_with_fallbacks(path: Path):
+    encodings = ['utf-8', 'utf-8-sig', 'gbk', 'cp936', 'latin1']
+    last_err = None
+    for enc in encodings:
+        try:
+            return pd.read_csv(path, encoding=enc, sep=None, engine='python')
+        except Exception as e:
+            last_err = e
+            continue
+    # 兜底：不指定编码（可能仍然是 utf-8）
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        if last_err:
+            raise last_err
+        else:
+            raise Exception(f'无法读取CSV: {path}')
 
 # 通用：将空字符串/特殊字样转为 None，避免写入数值列失败
 def _normalize_empty_values(value):
@@ -74,10 +177,91 @@ def mark_table_dirty(table_name: str):
 # New analytics for new datasets (university_grades, students)
 # -----------------------------
 
+
+
+@analysis_bp.route('/schema', methods=['GET'])
+def get_schema():
+    """返回所有可用表的列结构。
+
+    响应：{ status, schema: { table: [columns...] } }
+    """
+    try:
+        tables = _list_available_tables()
+        schema = {}
+        for t in tables:
+            schema[t] = _get_table_columns_any(t)
+        return jsonify({'status': 'success', 'schema': schema}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e), 'schema': {}}), 500
+
+
+@analysis_bp.route('/grade-tables', methods=['GET'])
+def list_grade_tables():
+    """
+    自动识别数据库中包含成绩相关列的表（通用版）
+    - 支持中英文列名
+    - 支持下划线、前缀/后缀命名
+    - 自动匹配常见科目 + 分数列组合
+    """
+    try:
+        import re
+
+        # 基础关键词
+        keywords = [
+            'score', 'grade', 'gpa', 'rank', 'level', 'avg', 'total', 'final', 'marks', 'point',
+            '分', '分数', '成绩', '等级', '排名'
+        ]
+
+        # 科目词（可扩展）
+        subjects = ['calculus', 'math', 'english', 'physics', 'chemistry', 'biology', 'history', 'geography']
+
+        tables = _list_available_tables()
+        print("Available tables:", tables)  # 调试输出
+
+        matched_tables = []
+        details = {}
+
+        for table in tables:
+            cols = _get_table_columns_any(table)
+            print(f"Table {table} columns:", cols)  # 调试输出
+
+            hit_cols = []
+            for c in cols:
+                c_str = str(c).lower()
+
+                # 1. 中文列名匹配关键词
+                if any(kw in c_str for kw in keywords):
+                    hit_cols.append(c)
+                    continue
+
+                # 2. 英文列名匹配科目 + score/avg 组合
+                if any(subj in c_str for subj in subjects) and any(k in c_str for k in ['score', 'avg', 'grade']):
+                    hit_cols.append(c)
+                    continue
+
+                # 3. 模糊匹配 pattern: *_subject_*score* 或 *_subject_*avg*
+                pattern = re.compile(r".*(" + "|".join(subjects) + r").*(score|avg).*")
+                if pattern.match(c_str):
+                    hit_cols.append(c)
+                    continue
+
+            if hit_cols:
+                matched_tables.append(table)
+                details[table] = hit_cols
+
+        return jsonify({'status': 'success', 'tables': matched_tables, 'details': details}), 200
+
+    except Exception as e:
+        import traceback, sys
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e), 'tables': []}), 500
+
+
+
 @analysis_bp.route('/ug/effort-vs-score', methods=['GET'])
 def ug_effort_vs_score():
-    """Scatter: study_hours vs calculus_avg_score (new) for university_grades.
-    Params: table (default 'university_grades'), x (default 'study_hours'), y (default 'calculus_avg_score').
+    """
     向后兼容：若不存在 calculus_avg_score，将自动降级为可用的分数字段（total_score 或 calculus_score 等）。
     """
     try:
@@ -163,14 +347,7 @@ def ug_score_by_effort_bucket():
 
 @analysis_bp.route('/ug/calculus-by-factors-bucket', methods=['GET'])
 def ug_calculus_by_factors_bucket():
-    """Multi-series: average calculus_avg_score (new) across quantile buckets of multiple factors.
-    Params:
-      factors: comma-separated columns (default study_hours,attendance_count,homework_score,practice_count)
-      buckets: number of quantile buckets (default 5)
-      target: optional score column (default calculus_avg_score); will fallback intelligently.
-          student_id: optional; when provided, restrict analysis to the cohort matching the student's grade (falls back gracefully).
-        Returns: { labels: ['Q1','Q2',...], series: [{name, data: [avg per bucket]}] }
-    """
+    
     try:
         # 支持从前端指定表，默认 university_grades
         table_name = request.args.get('table', 'university_grades')
@@ -355,18 +532,18 @@ def get_student_detail():
     """
     try:
         sid = request.args.get('student_id')
+        table = request.args.get('table')
         if not sid:
             return jsonify({'status': 'error', 'message': '缺少参数: student_id'}), 400
 
-        # Load tables
-        st = get_table_data('students')
-        ug = get_table_data('university_grades')
-
+        # 优先用 table 参数查找
         profile = None
         grades = None
         percentiles = {}
         factors = None
 
+        # 1. profile: 若有 students 表，优先查 students
+        st = get_table_data('students')
         if st is not None and not st.empty and 'student_id' in st.columns:
             sdf = st[st['student_id'].astype(str) == str(sid)]
             if not sdf.empty:
@@ -383,58 +560,100 @@ def get_student_detail():
                     'email': str(row.get('email', '')),
                 }
 
+        # 2. grades/factors/percentiles: 优先用 table 参数
+        grades_table = table if table else 'university_grades'
+        ug = get_table_data(grades_table)
         if ug is not None and not ug.empty and 'student_id' in ug.columns:
             ugf = ug[ug['student_id'].astype(str) == str(sid)]
             if not ugf.empty:
                 ur = ugf.iloc[0]
-                # basic grades record
                 def to_float(v):
                     try:
                         f = pd.to_numeric(v, errors='coerce')
                         return float(f) if pd.notna(f) else None
                     except Exception:
                         return None
-
                 def to_int(v):
                     try:
                         f = pd.to_numeric(v, errors='coerce')
                         return int(f) if pd.notna(f) else None
                     except Exception:
                         return None
-
-                grades = {
-                    # 新列（若不可用则在规范化时会构造）
-                    'first_calculus_score': to_float(ur.get('first_calculus_score')),
-                    'second_calculus_score': to_float(ur.get('second_calculus_score')),
-                    'third_calculus_score': to_float(ur.get('third_calculus_score')),
-                    'calculus_avg_score': to_float(ur.get('calculus_avg_score')),
-                    # 兼容旧列（保持一段时间）
-                    'calculus_score': to_float(ur.get('calculus_score')),
-                    'total_score': to_float(ur.get('total_score')),
-                    # 学习相关因子
-                    'study_hours': to_float(ur.get('study_hours')),
-                    'attendance_count': to_int(ur.get('attendance_count')),
-                    'homework_score': to_float(ur.get('homework_score')),
-                    'practice_count': to_int(ur.get('practice_count')),
-                }
-
-                # percentiles against whole table
-                for col in ['calculus_avg_score', 'first_calculus_score', 'second_calculus_score', 'third_calculus_score', 'calculus_score', 'total_score']:
-                    if col in ug.columns:
+                # 动态收集所有数值列
+                grades = {k: to_float(ur.get(k)) for k in ug.columns if ug[k].dtype.kind in 'fi'}
+                # 兼容旧字段
+                for k in ['first_calculus_score','second_calculus_score','third_calculus_score','calculus_avg_score','calculus_score','total_score','study_hours','attendance_count','homework_score','practice_count']:
+                    if k not in grades:
+                        grades[k] = to_float(ur.get(k))
+                # percentiles: 针对所有数值列
+                for col in ug.columns:
+                    if ug[col].dtype.kind in 'fi':
                         col_ser = pd.to_numeric(ug[col], errors='coerce').dropna()
                         val = pd.to_numeric(ur.get(col), errors='coerce')
                         if pd.notna(val) and len(col_ser) > 0:
-                            # simple percentile: proportion less than or equal
                             p = float((col_ser <= float(val)).mean() * 100.0)
                             percentiles[col] = round(p, 2)
+                # factors: 选取常见因子列
+                factors = []
+                for fname, label in [
+                    ('study_hours','学习时长'),
+                    ('attendance_count','出勤次数'),
+                    ('homework_score','作业分数'),
+                    ('practice_count','刷题数')]:
+                    v = grades.get(fname)
+                    if v is not None:
+                        factors.append({'name': label, 'value': v})
+                # 若无常见因子，自动选前4个数值列
+                if not factors:
+                    num_cols = [k for k in ug.columns if ug[k].dtype.kind in 'fi']
+                    for k in num_cols[:4]:
+                        v = grades.get(k)
+                        if v is not None:
+                            factors.append({'name': k, 'value': v})
 
-                # assemble factors for a small chart in frontend
-                factors = [
-                    {'name': '学习时长', 'value': grades['study_hours'] if grades['study_hours'] is not None else 0},
-                    {'name': '出勤次数', 'value': grades['attendance_count'] if grades['attendance_count'] is not None else 0},
-                    {'name': '作业分数', 'value': grades['homework_score'] if grades['homework_score'] is not None else 0},
-                    {'name': '刷题数', 'value': grades['practice_count'] if grades['practice_count'] is not None else 0},
-                ]
+        # 补全所有字段为0（profile/grades/factors/percentiles）
+        def fill_zeros(d, keys):
+            if d is None:
+                d = {}
+            for k in keys:
+                if d.get(k) is None:
+                    d[k] = 0
+            return d
+
+        # profile常用字段
+        profile_keys = ['student_id','student_no','name','gender','grade','class','birth_date','contact_phone','email']
+        grades_keys = ['first_calculus_score','second_calculus_score','third_calculus_score','calculus_avg_score','calculus_score','total_score','study_hours','attendance_count','homework_score','practice_count']
+        percentiles_keys = grades_keys
+        # profile
+        profile = fill_zeros(profile, profile_keys)
+        grades = fill_zeros(grades, grades_keys)
+        # percentiles
+        if percentiles is None:
+            percentiles = {}
+        for k in percentiles_keys:
+            if percentiles.get(k) is None:
+                percentiles[k] = 0
+
+        # factors：始终补齐4个常用因子（顺序固定，缺失补0）
+        factor_labels = [
+            ('study_hours','学习时长'),
+            ('attendance_count','出勤次数'),
+            ('homework_score','作业分数'),
+            ('practice_count','刷题数')
+        ]
+        factors_map = {f['name']: f.get('value', 0) for f in factors} if factors else {}
+        new_factors = []
+        for fname, label in factor_labels:
+            v = None
+            # 优先 grades
+            if grades and fname in grades and grades[fname] is not None:
+                v = grades[fname]
+            elif factors_map.get(label) is not None:
+                v = factors_map[label]
+            else:
+                v = 0
+            new_factors.append({'name': label, 'value': v})
+        factors = new_factors
 
         return jsonify({
             'status': 'success',
@@ -452,15 +671,6 @@ def get_student_detail():
 # Helpers: table loading and utils (used by multiple endpoints and training)
 # -----------------------------
 def _normalize_university_grades_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize university_grades columns to new schema with backward compatibility.
-
-    Ensures the following columns exist when possible:
-    - first_calculus_score, second_calculus_score, third_calculus_score, calculus_avg_score
-    Fallback rules:
-    - If first_calculus_score missing but calculus_score exists, copy it.
-    - If calculus_avg_score missing, compute mean of available first/second/third (ignore NaN);
-      if still missing, fallback to total_score or calculus_score if present.
-    """
     try:
         cols = set(df.columns.astype(str))
         # Create attempt columns if missing
@@ -496,19 +706,13 @@ def _normalize_university_grades_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_table_data(table_name: str):
-    """Load table as pandas DataFrame from DB, fallback to CSV in database_datasets.
-
-    Returns None when not found.
-    """
     try:
-        # Try DB
         rows = fetch_all(f"SELECT * FROM `{table_name}`")
         if rows is not None and len(rows) > 0:
             df = pd.DataFrame(rows)
             if table_name == 'university_grades' and df is not None and not df.empty:
                 df = _normalize_university_grades_df(df)
             return df
-        # If DB reachable but empty, still return empty DF with columns from INFORMATION_SCHEMA when possible
         cols = []
         try:
             cols = get_columns(table_name) or []
@@ -519,15 +723,25 @@ def get_table_data(table_name: str):
             df = _normalize_university_grades_df(df)
         return df
     except Exception:
-        # Fallback to CSV
+        # Fallback to CSV (including uploads directory)
         csv_candidates = [
             Path(__file__).parent.parent / 'database_datasets' / f'{table_name}.csv',
             Path(__file__).parent.parent.parent / 'database_datasets' / f'{table_name}.csv'
         ]
+        # 递归查找 uploads 目录，优先匹配 {table_name}.csv
+        try:
+            uploads_dir = Path(__file__).parent.parent / 'uploads'
+            if uploads_dir.exists() and uploads_dir.is_dir():
+                for p in uploads_dir.rglob('*.csv'):
+                    if p.stem == table_name:
+                        csv_candidates.insert(0, p)
+                        break
+        except Exception:
+            pass
         for p in csv_candidates:
             try:
                 if p.exists():
-                    df = pd.read_csv(p, encoding='utf-8')
+                    df = _read_csv_full_with_fallbacks(p)
                     if table_name == 'university_grades' and df is not None and not df.empty:
                         df = _normalize_university_grades_df(df)
                     return df
@@ -587,15 +801,6 @@ def get_friendly_column_name(col: str):
 
 # 预定义表结构映射，用于优化特定表的处理
 table_structures = {
-    'class_performance': {
-        'id_columns': ['performance_id', 'student_id', 'course_id'],
-        'score_columns': ['attendance_score', 'participation_score', 'quiz_score', 
-                         'assignment_score', 'project_score', 'final_exam_score'],
-        'categorical_columns': ['semester', 'course_id', 'teacher_id', 
-                               'learning_attitude', 'discipline'],
-        'time_column': 'semester',
-        'text_columns': ['teacher_comments', 'created_at', 'updated_at']
-    },
     'students': {
         'id_columns': ['student_id'],
         'numerical_columns': [],  # 学生表通常没有直接的数值成绩
@@ -603,38 +808,7 @@ table_structures = {
                                'hukou_type', 'is_boarding', 'family_income', 'parent_education'],
         'text_columns': ['name', 'student_no', 'birth_date', 'contact_phone', 'email', 
                         'admission_date', 'address', 'created_at', 'updated_at']
-    },
-    'exam_scores': {
-        'id_columns': ['score_id', 'student_id', 'course_id', 'exam_type_id', 'teacher_id'],
-        'score_columns': ['score'],
-        'ranking_columns': ['ranking'],
-        'categorical_columns': ['exam_type_id', 'score_level', 'course_id',
-                               'difficulty', 'completion_status'],
-        'time_column': 'exam_date',
-        'text_columns': ['exam_name', 'comments', 'created_at']
-    },
-    'historical_grades': {
-        'id_columns': ['grade_id', 'student_id', 'course_id', 'teacher_id'],
-        'score_columns': ['midterm_score', 'final_score', 'usual_score', 'total_score'],
-        'ranking_columns': ['ranking'],
-        'categorical_columns': ['semester', 'academic_year', 'course_id', 'grade_level'],
-        'time_column': 'semester',
-        'text_columns': ['created_at']
     }
-}
-
-# 学科关键词映射，用于识别学科相关列
-subject_keywords = {
-    '语文': ['chinese', 'ch', '语文', 'chinese_score', 'ch_score'],
-    '数学': ['math', 'mathematics', '数学', 'math_score', 'm_score'],
-    '英语': ['english', 'en', '英语', 'english_score', 'e_score'],
-    '物理': ['physics', '物理', 'physics_score', 'p_score'],
-    '化学': ['chemistry', '化学', 'chemistry_score', 'c_score'],
-    '生物': ['biology', '生物', 'biology_score', 'b_score'],
-    '历史': ['history', '历史', 'history_score', 'h_score'],
-    '地理': ['geography', '地理', 'geography_score', 'g_score'],
-    '政治': ['politics', '政治', 'politics_score', 'po_score'],
-    '体育': ['pe', 'physical', '体育', 'pe_score', 's_score']
 }
 
 # 特征名称映射，用于更友好的显示
@@ -643,30 +817,7 @@ feature_name_map = {
     'student_id': '学生ID',
     'course_id': '课程ID',
     'teacher_id': '教师ID',
-    'semester': '学期',
-    'academic_year': '学年',
-    'ranking': '排名',
     'score': '分数',
-    # class_performance表
-    'attendance_score': '出勤分数',
-    'attendance': '出勤分数',
-    'attendance_rate': '出勤分数',
-    'participation_score': '参与分数',
-    'participation': '参与分数',
-    'quiz_score': '测验分数',
-    'quiz': '测验分数',
-    'assignment_score': '作业分数',
-    'assignment': '作业分数',
-    'homework': '作业分数',
-    'project_score': '项目分数',
-    'project': '项目分数',
-    'final_exam_score': '期末考试分数',
-    'final_exam': '期末考试分数',
-    'final_score': '期末成绩',
-    'midterm_score': '期中成绩',
-    'usual_score': '平时成绩',
-    'learning_attitude': '学习态度',
-    'discipline': '纪律表现',
     # students表
     'student_no': '学号',
     'name': '姓名',
@@ -678,22 +829,7 @@ feature_name_map = {
     'is_boarding': '是否住校',
     'family_income': '家庭收入',
     'parent_education': '父母学历',
-    # exam_scores表
-    'score_id': '成绩ID',
-    'exam_type_id': '考试类型ID',
-    'exam_name': '考试名称',
-    'exam_date': '考试日期',
-    'score_level': '成绩等级',
-    'difficulty': '试卷难度',
-    'completion_status': '完成状态',
-    # historical_grades表
-    'grade_id': '成绩记录ID',
-    'midterm_score': '期中成绩',
-    'final_score': '期末成绩',
-    'usual_score': '平时成绩',
-    'total_score': '总成绩',
-    'grade_level': '等级',
-    # university_grades表（新方案）
+    # university_grades表
     'calculus_score': '高数成绩',
     'first_calculus_score': '高数第一次成绩',
     'second_calculus_score': '高数第二次成绩',
@@ -1120,27 +1256,8 @@ def list_student_feedback_history():
 def list_tables():
     """获取数据库中的所有表名"""
     try:
-        tables = []
-        try:
-            tables = get_tables() or []
-        except Exception as db_err:
-            print(f"获取数据库表失败，尝试CSV回退: {db_err}")
-
-        # 如果数据库不可用或无表，尝试从 CSV 目录推断
-        if not tables:
-            csv_dir_candidates = [
-                Path(__file__).parent.parent / 'database_datasets',
-                Path(__file__).parent.parent.parent / 'database_datasets'
-            ]
-            csv_tables = set()
-            for d in csv_dir_candidates:
-                try:
-                    if d.exists():
-                        for p in d.glob('*.csv'):
-                            csv_tables.add(p.stem)
-                except Exception:
-                    continue
-            tables = sorted(list(csv_tables))
+        # 统一用内部的探测函数，已包含 DB + database_datasets + uploads 递归
+        tables = _list_available_tables()
 
         return jsonify({
             'status': 'success',
@@ -1737,20 +1854,29 @@ def get_table_data(table_name):
     except Exception as e:
         print(f"从数据库加载失败: {e}")
     
-    # 如果数据库加载失败，尝试从CSV文件加载
+    # 如果数据库加载失败，尝试从CSV文件加载（包含 uploads 目录）
     if df is None:
         print(f"尝试从CSV文件加载表 {table_name} 的数据")
-        csv_paths = [
-            f"../database_datasets/{table_name}.csv",
-            f"database_datasets/{table_name}.csv"
+        csv_candidates = [
+            Path(__file__).parent.parent / 'database_datasets' / f'{table_name}.csv',
+            Path(__file__).parent.parent.parent / 'database_datasets' / f'{table_name}.csv'
         ]
-        
-        for csv_path in csv_paths:
+        try:
+            uploads_dir = Path(__file__).parent.parent / 'uploads'
+            if uploads_dir.exists() and uploads_dir.is_dir():
+                for p in uploads_dir.rglob('*.csv'):
+                    if p.stem == table_name:
+                        csv_candidates.insert(0, p)
+                        break
+        except Exception:
+            pass
+        for p in csv_candidates:
             try:
-                df = pd.read_csv(csv_path, encoding='utf-8')
-                print(f"CSV数据加载成功")
-                break
-            except:
+                if p.exists():
+                    df = _read_csv_full_with_fallbacks(p)
+                    print("CSV数据加载成功")
+                    break
+            except Exception:
                 continue
     
     # 如果加载成功，进行数据清理和缓存
@@ -2307,11 +2433,21 @@ def get_table_data_api():
         
         # 获取表数据
         df = get_table_data(table_name)
-        if df is None or df.empty:
+        if df is None:
             return jsonify({
                 'status': 'error',
-                'message': f'没有找到{table_name}表的数据'
+                'message': f'没有找到{table_name}表的数据（返回None，可能文件损坏、无表头、编码或分隔符异常）'
             }), 404
+        if df.empty:
+            return jsonify({
+                'status': 'success',
+                'data': [],
+                'total': 0,
+                'page': page,
+                'page_size': page_size,
+                'has_more': False,
+                'message': f'{table_name}表为空（有表头无数据或无有效数据）'
+            }), 200
         
         total_records = len(df)
         
@@ -2359,6 +2495,7 @@ def get_table_data_api():
         return jsonify({
             'status': 'success',
             'data': data,
+            'columns': list(df.columns),  # 保证顺序与原始CSV一致
             'total': total_records,
             'page': page,
             'page_size': page_size,
@@ -2426,6 +2563,12 @@ def get_correlation():
             'status': 'error',
             'message': str(e)
         }), 500
+
+
+# 注意：/statistics 已在文件前部实现，避免重复定义
+
+
+# 注意：/export-report 在文件后部已有更完整实现(export_analysis_report)，避免重复定义
 
 
 @analysis_bp.route('/score-distribution', methods=['GET'])

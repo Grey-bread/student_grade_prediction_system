@@ -357,18 +357,30 @@ export default {
     },
     async loadTables() {
       try {
-        const res = await axios.get('/api/analysis/tables')
-        if (res.data?.status === 'success') {
-          const all = res.data.tables || []
-          // 仅关注相关表，并优先 university_grades
-          this.availableTables = all.filter(t => ['university_grades','students'].includes(t))
-          if (!this.trainConfig.table) {
-            if (this.availableTables.includes('university_grades')) this.trainConfig.table = 'university_grades'
-            else if (this.availableTables.length) this.trainConfig.table = this.availableTables[0]
-          }
-          // 载入表后刷新可选目标列
-          await this.fetchTargetColumns()
+        // 优先使用按列名识别的成绩表，兼容上传的“1”等文件名；保留 students
+        const [gradeRes, allRes] = await Promise.allSettled([
+          axios.get('/api/analysis/grade-tables'),
+          axios.get('/api/analysis/tables')
+        ])
+        let gradeTables = []
+        if (gradeRes.status === 'fulfilled' && gradeRes.value?.data?.status === 'success') {
+          gradeTables = gradeRes.value.data.tables || []
         }
+        let allTables = []
+        if (allRes.status === 'fulfilled' && allRes.value?.data?.status === 'success') {
+          allTables = allRes.value.data.tables || []
+        }
+        const set = new Set(gradeTables)
+        if (allTables.includes('students')) set.add('students')
+        this.availableTables = Array.from(set)
+        // 默认：优先 university_grades 其次其它成绩表，再 students
+        if (!this.trainConfig.table || !this.availableTables.includes(this.trainConfig.table)) {
+          if (this.availableTables.includes('university_grades')) this.trainConfig.table = 'university_grades'
+          else if (gradeTables.length > 0) this.trainConfig.table = gradeTables[0]
+          else if (this.availableTables.includes('students')) this.trainConfig.table = 'students'
+          else if (this.availableTables.length > 0) this.trainConfig.table = this.availableTables[0]
+        }
+        await this.fetchTargetColumns()
       } catch (err) {
         console.error('加载表列表失败:', err)
       }
@@ -629,9 +641,12 @@ export default {
     },
 
     getTableLabel(table) {
-      if (!table) return '自定义表'
-      if (/[^\x00-\x7F]/.test(String(table))) return table
-      return this.translateTableName(table)
+      if (!table) return ''
+      const s = String(table)
+      if (/[^\x00-\x7F]/.test(s)) return s
+      // 纯数字或很短的原始名（如“1”、“1_2024”），直接显示原名
+      if (/^[0-9._-]+$/.test(s) || s.length <= 3) return s
+      return this.translateTableName(s)
     },
     translateTableName(name) {
       const dict = {
@@ -651,8 +666,9 @@ export default {
       }
       const parts = String(name).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
       const cn = parts.map(p => dict[p]).filter(Boolean)
-      if (cn.length) return cn.join('') + '表'
-      return '自定义表'
+  if (cn.length) return cn.join('') + '表'
+  // 默认直接返回原始名称，避免误导
+  return String(name)
     },
     translateColumnName(col) {
       const map = {

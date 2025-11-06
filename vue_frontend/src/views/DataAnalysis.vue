@@ -217,7 +217,8 @@ export default {
   data() {
     return {
       analysisForm: {
-        selectedTable: 'students'
+        // 默认展示“成绩表”：优先历史成绩表
+        selectedTable: 'historical_grades'
       },
       availableTables: [],
       statisticsData: [],
@@ -234,7 +235,8 @@ export default {
         'exam_scores': '考试成绩表',
         'class_performance': '课堂表现表',
         'courses': '课程信息表',
-        'exam_types': '考试类型表'
+        'exam_types': '考试类型表',
+        'university_grades': '大学成绩表'
       },
       loadingExport: false
     }
@@ -260,6 +262,8 @@ export default {
       if (this.tableNameMap[tableName]) return this.tableNameMap[tableName]
       // 若包含非ASCII（如中文），直接返回
       if (/[^\x00-\x7F]/.test(tableName)) return tableName
+      // 若为纯数字或混合非字母的短名称（如 "1"、"1_2024"），直接显示原名，避免误显示为“自定义表”
+      if (/^[0-9._-]+$/.test(String(tableName)) || String(tableName).length <= 3) return String(tableName)
       // 英文名转中文
       return this.translateTableName(tableName)
     },
@@ -283,7 +287,8 @@ export default {
       const parts = String(name).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
       const cn = parts.map(p => dict[p]).filter(Boolean)
       if (cn.length) return cn.join('') + '表'
-      return '自定义表'
+      // 默认直接返回原始名称，避免误导
+      return String(name)
     },
     
     // 初始化所有图表
@@ -292,7 +297,7 @@ export default {
         // 初始化相关性图表
         if (this.$refs.correlationChart && !this.correlationChart) {
           this.correlationChart = echarts.init(this.$refs.correlationChart)
-          console.log('相关性图表初始化成功')
+          // 图表初始化
         }
         
         // 监听窗口大小变化
@@ -311,51 +316,87 @@ export default {
       this.correlationChart?.dispose()
     },
     
-    // 获取数据库表列表
-    fetchTables() {
+    // 获取数据库表列表（优先按列名识别“成绩表”，兼容上传的一次性表名如“1.csv”）
+    async fetchTables() {
       this.loadingTables = true
-      return axios.get('/api/analysis/tables')
-        .then(response => {
-          if (response.data.status === 'success') {
-            const allTables = response.data.tables || []
-            // 使用后端返回的全部表，允许用户选择上传的任意表
-            this.availableTables = allTables
-            
-            // 如果当前选择不在白名单或可用表中，进行重置
-            if (!this.availableTables.includes(this.analysisForm.selectedTable)) {
-              this.analysisForm.selectedTable = ''
-            }
-            
-            // 如果没有设置默认表，则按优先级选择
-            if (!this.analysisForm.selectedTable) {
-              if (this.availableTables.includes('students')) {
-                this.analysisForm.selectedTable = 'students'
-              } else if (this.availableTables.includes('historical_grades')) {
-                this.analysisForm.selectedTable = 'historical_grades'
-              } else if (this.availableTables.includes('exam_scores')) {
-                this.analysisForm.selectedTable = 'exam_scores'
-              } else if (this.availableTables.includes('class_performance')) {
-                this.analysisForm.selectedTable = 'class_performance'
-              } else if (this.availableTables.length > 0) {
-                this.analysisForm.selectedTable = this.availableTables[0]
-              }
-            }
-            
-            if (this.analysisForm.selectedTable) {
-              this.refreshData()
-            }
-          } else {
-            ElMessage.error(response.data.message || '获取数据表列表失败')
+      const pickDefault = () => {
+        if (!this.analysisForm.selectedTable) {
+          if (this.availableTables.includes('historical_grades')) {
+            this.analysisForm.selectedTable = 'historical_grades'
+          } else if (this.availableTables.includes('university_grades')) {
+            this.analysisForm.selectedTable = 'university_grades'
+          } else if (this.availableTables.includes('exam_scores')) {
+            this.analysisForm.selectedTable = 'exam_scores'
+          } else if (this.availableTables.includes('class_performance')) {
+            this.analysisForm.selectedTable = 'class_performance'
+          } else if (this.availableTables.length > 0) {
+            this.analysisForm.selectedTable = this.availableTables[0]
           }
-        })
-        .catch(error => {
-          console.error('获取数据表列表失败:', error)
-          ElMessage.error('获取数据表列表失败: ' + error.message)
-          throw error  // 重新抛出错误以便上层处理
-        })
-        .finally(() => {
-          this.loadingTables = false
-        })
+        }
+      }
+      try {
+        // 先直接询问后端“成绩表”识别结果（无需前端自行解析列）
+        const gradeRes = await axios.get('/api/analysis/grade-tables')
+        if (gradeRes.data?.status === 'success') {
+          const tables = gradeRes.data.tables || []
+          if (tables.length > 0) {
+            this.availableTables = tables
+            if (!this.availableTables.includes(this.analysisForm.selectedTable)) this.analysisForm.selectedTable = ''
+            pickDefault()
+            if (this.analysisForm.selectedTable) this.refreshData()
+            this.loadingTables = false
+            return
+          }
+          // 若识别为空，不返回，继续尝试 schema 回退
+        }
+      } catch (_) { /* 忽略，继续尝试 schema */ }
+      try {
+        // 其次：获取 schema，自行按列名关键词过滤
+        const schemaRes = await axios.get('/api/analysis/schema')
+        if (schemaRes.data?.status === 'success' && schemaRes.data.schema) {
+          const schema = schemaRes.data.schema
+          const keywords = ['score', 'grade', 'gpa', 'rank', 'level', '分', '分数', '成绩', '等级', '排名']
+          const matches = Object.entries(schema)
+            .filter(([t, cols]) => Array.isArray(cols) && cols.some(c => keywords.some(k => String(c).toLowerCase().includes(k))))
+            .map(([t]) => t)
+          if (matches.length > 0) {
+            this.availableTables = matches
+            if (!this.availableTables.includes(this.analysisForm.selectedTable)) this.analysisForm.selectedTable = ''
+            pickDefault()
+            if (this.analysisForm.selectedTable) this.refreshData()
+            this.loadingTables = false
+            return
+          }
+        }
+      } catch (_) { /* 忽略，继续 tables 回退 */ }
+
+      try {
+        // 最后回退：仅表名启发式
+        const response = await axios.get('/api/analysis/tables')
+        if (response.data.status === 'success') {
+          const allTables = response.data.tables || []
+          const isGradeTable = (name) => {
+            if (!name) return false
+            const n = String(name).toLowerCase()
+            const allowList = new Set(['historical_grades', 'university_grades', 'exam_scores', 'class_performance'])
+            if (allowList.has(n)) return true
+            const kw = ['grade', 'score', '成绩', '分数', '分', 'performance']
+            return kw.some(k => n.includes(k))
+          }
+          this.availableTables = (allTables || []).filter(isGradeTable)
+          if (!this.availableTables.includes(this.analysisForm.selectedTable)) this.analysisForm.selectedTable = ''
+          pickDefault()
+          if (this.analysisForm.selectedTable) this.refreshData()
+        } else {
+          ElMessage.error(response.data.message || '获取数据表列表失败')
+        }
+      } catch (error) {
+        console.error('获取数据表列表失败:', error)
+        ElMessage.error('获取数据表列表失败: ' + error.message)
+        throw error
+      } finally {
+        this.loadingTables = false
+      }
     },
     
     // 表切换处理
@@ -444,7 +485,7 @@ export default {
             const data = response.data.data || []
             const features = response.data.features || []
             
-            console.log('相关性数据:', { features, dataPoints: data.length })
+            // 收到相关性数据
             
             if (data.length === 0 || features.length < 2) {
               this.hasCorrelationData = false
@@ -532,8 +573,11 @@ export default {
                 ]
               }
               
-              this.correlationChart.setOption(option)
-              console.log('相关性图表更新完成')
+              // 使用 notMerge=true 强制完整替换，避免前一次配置残留导致缺少 visualMap 时触发
+              // “Heatmap must use with visualMap” 错误
+              try { this.correlationChart.clear() } catch (_) {}
+              this.correlationChart.setOption(option, true)
+              // 图表更新完成
             })
           } else {
             this.hasCorrelationData = false

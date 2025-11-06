@@ -9,14 +9,20 @@
 
       <!-- 查询条件（基于新数据集：students / university_grades） -->
       <el-form :inline="true" :model="query" class="query-form">
+        <el-form-item label="成绩表">
+          <el-select v-model="query.selectedGradeTable" placeholder="选择成绩表" style="width: 180px;"
+            @focus="fetchGradeTables" @change="onGradeTableChange">
+            <el-option v-for="t in gradeTables" :key="t" :label="getTableLabel(t)" :value="t" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="按学号/姓名选择">
           <el-select v-model="query.selectedStudent" filterable clearable placeholder="输入学号或姓名搜索"
-                     style="width: 300px;" @focus="ensureStudentsLoadedPreferBackend" @change="onSelectStudent">
+                     style="width: 220px;" @focus="ensureStudentsLoadedPreferBackend(query.selectedGradeTable)" @change="onSelectStudent">
             <el-option v-for="s in studentsList" :key="s.student_id" :label="`${s.student_no || '—'} - ${s.name || '—'}`" :value="s.student_id" />
           </el-select>
         </el-form-item>
         <el-form-item label="学生ID">
-          <el-input v-model="query.studentId" placeholder="或直接输入学生ID" style="width: 200px;" />
+          <el-input v-model="query.studentId" placeholder="或直接输入学生ID" style="width: 120px;" />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="loading" @click="loadFeedback">生成反馈</el-button>
@@ -24,14 +30,14 @@
         </el-form-item>
       </el-form>
 
-  <!-- 加载中占位 -->
-  <el-skeleton v-if="loading" :rows="6" animated />
+      <!-- 加载中占位 -->
+      <el-skeleton v-if="loading" :rows="6" animated />
       
-  <!-- 未加载数据 -->
-  <el-empty v-else-if="!hasDetail" description="请先通过上方“学号/姓名选择”或输入学生ID，点击生成反馈" />
+      <!-- 未加载数据 -->
+      <el-empty v-else-if="!hasDetail" description="请先通过上方“学号/姓名选择”或输入学生ID，点击生成反馈" />
 
-  <!-- 展示反馈详情 -->
-  <div v-else>
+      <!-- 展示反馈详情 -->
+      <div v-else>
         <!-- 学生基本信息 -->
         <el-card class="section-card" v-loading="loading">
           <template #header>
@@ -146,6 +152,7 @@ export default {
         courseId: null,
         selectedStudent: null
       },
+      gradeTables: [],
       // 本地 CSV 容器（仅使用 UG，students 缺失也可渲染）
       csvUG: [],
       studentsList: [],
@@ -153,9 +160,8 @@ export default {
       trendFeedback: [],
       weaknessFeedback: [],
       suggestionFeedback: [],
-  historyList: [],
+      historyList: [],
       classStats: { avgScore: null, avgHours: null, attemptAvg: { first: null, second: null, third: null } },
-      
     }
   },
   computed: {
@@ -164,37 +170,70 @@ export default {
     }
   },
   mounted() {
-    // 预加载学生清单，便于直接搜索选择；失败不影响手动输入ID
+    this.fetchGradeTables()
     this.ensureStudentsLoadedPreferBackend().catch(()=>{})
   },
   methods: {
-    async ensureStudentsLoadedPreferBackend() {
-      if (this.studentsList.length) return
-      // 先后端，再 CSV
+    async fetchGradeTables() {
+      if (this.gradeTables.length) return
       try {
-        const res = await axios.get('/api/analysis/table-data', { params: { table: 'students', page: 1, page_size: 10000 } })
+        const res = await axios.get('/api/analysis/grade-tables')
+        if (res.data?.status === 'success') {
+          this.gradeTables = res.data.tables || []
+          if (!this.query.selectedGradeTable && this.gradeTables.length)
+            this.query.selectedGradeTable = this.gradeTables[0]
+        }
+      } catch {}
+    },
+    getTableLabel(t) {
+      if (!t) return ''
+      if (/^[0-9._-]+$/.test(t) || t.length <= 3) return t
+      const map = {university_grades:'大学成绩',historical_grades:'历史成绩',exam_scores:'考试成绩',class_performance:'课堂表现'}
+      return map[t] || t
+    },
+    async ensureStudentsLoadedPreferBackend(tableName) {
+      // tableName: 当前选中的成绩表名
+      this.studentsList = []
+      const table = tableName || this.query.selectedGradeTable || 'university_grades'
+      try {
+        const res = await axios.get('/api/analysis/table-data', { params: { table, page: 1, page_size: 10000 } })
         if (res.data?.status === 'success' && Array.isArray(res.data.data)) {
-          this.studentsList = res.data.data
+          // 尝试自动识别学生ID/学号/姓名字段
+          const data = res.data.data
+          // 兼容不同表字段
+          this.studentsList = data.map(r => ({
+            student_id: r.student_id || r.id || r.学号 || r.ID || '',
+            student_no: r.student_no || r.学号 || r.id || r.ID || '',
+            name: r.name || r.姓名 || '',
+            gender: r.gender || r.性别 || '',
+            grade: r.grade || r.年级 || '',
+            class: r.class || r.班级 || ''
+          }))
           return
         }
       } catch {}
+      // fallback: 尝试本地csv
       try {
-        const rows = await this.fetchCsv('/data/students.csv')
-        // 只保留关键列
+        const rows = await this.fetchCsv(`/data/${table}.csv`)
         this.studentsList = rows.map(r => ({
-          student_id: r.student_id,
-          student_no: r.student_no,
-          name: r.name,
-          gender: r.gender,
-          grade: r.grade,
-          class: r.class,
+          student_id: r.student_id || r.id || r.学号 || r.ID || '',
+          student_no: r.student_no || r.学号 || r.id || r.ID || '',
+          name: r.name || r.姓名 || '',
+          gender: r.gender || r.性别 || '',
+          grade: r.grade || r.年级 || '',
+          class: r.class || r.班级 || ''
         }))
-      } catch (e) {
-        // 忽略，仍可手输ID
-      }
+      } catch (e) {}
+    },
+
+    onGradeTableChange(val) {
+      // 切换成绩表时，刷新学生下拉并清空已选
+      this.query.selectedStudent = null
+      this.query.studentId = ''
+      this.studentsList = []
+      this.ensureStudentsLoadedPreferBackend(val)
     },
     onSelectStudent(val) {
-      // val 为选中的 student_id
       this.query.studentId = String(val || '')
     },
     async loadFeedback() {
@@ -208,10 +247,10 @@ export default {
       this.weaknessFeedback = []
       this.suggestionFeedback = []
       try {
-        // 1) 优先尝试后端接口
         let usedBackend = false
+        const gradesTable = this.query.selectedGradeTable || 'university_grades'
         try {
-          const res = await axios.get('/api/analysis/student-detail', { params: { student_id: this.query.studentId } })
+          const res = await axios.get('/api/analysis/student-detail', { params: { student_id: this.query.studentId, table: gradesTable } })
           if (res.data?.status === 'success') {
             usedBackend = true
             this.detail = {
@@ -221,21 +260,14 @@ export default {
               factors: Array.isArray(res.data.factors) ? res.data.factors : []
             }
           }
-        } catch (e) {
-          // 忽略，走 CSV 回退
-        }
-
-        // 加载班级对比数据（无论是否用后端详情，仍需UG数据做均值对比）
-        await this.ensureUGLoadedPreferBackend()
+        } catch (e) {}
+        await this.ensureUGLoadedPreferBackend(gradesTable)
         if (!usedBackend) {
-          // 后端不可用，基于 CSV 构造详情
           this.detail = this.buildDetailFromCsv(String(this.query.studentId).trim())
         }
-        // 计算班级均值并生成三块反馈
         this.computeClassStats()
         this.buildThreeDimensionFeedback()
-  // 加载历史
-  await this.loadHistory()
+        await this.loadHistory()
         ElMessage.success('已生成反馈')
       } catch (e) {
         console.error(e)
@@ -256,10 +288,9 @@ export default {
           source: 'student-feedback-ui'
         }
         const res = await axios.post('/api/analysis/student-feedback/save', payload)
-  if (res.data?.status === 'success') this.$message?.success?.('已保存到系统')
+        if (res.data?.status === 'success') this.$message?.success?.('已保存到系统')
         else this.$message?.error?.(res.data?.message || '保存失败')
-  // 保存后刷新历史
-  await this.loadHistory()
+        await this.loadHistory()
       } catch (e) {
         console.error(e)
         this.$message?.error?.(e.response?.data?.message || e.message || '保存失败')
@@ -271,7 +302,6 @@ export default {
         const r = await axios.get('/api/analysis/student-feedback/history', { params: { student_id: this.query.studentId, limit: 100 } })
         if (r.data?.status === 'success') {
           const arr = Array.isArray(r.data.data) ? r.data.data : []
-          // 仅保留学生反馈，过滤掉 progress
           this.historyList = arr.filter(it => String(it.entry_type || '').toLowerCase() !== 'progress')
         }
         else this.historyList = []
@@ -288,17 +318,15 @@ export default {
       } catch { return '记录' }
     },
     async ensureUGLoadedPreferBackend() {
-      if (this.csvUG.length) return
-      // 先尝试后端表数据
+      const gradesTable = this.query.selectedGradeTable || 'university_grades'
       try {
-        const ug = await axios.get('/api/analysis/table-data', { params: { table: 'university_grades', page: 1, page_size: 10000 } })
+        const ug = await axios.get('/api/analysis/table-data', { params: { table: gradesTable, page: 1, page_size: 10000 } })
         if (ug.data?.status === 'success' && Array.isArray(ug.data.data) && ug.data.data.length) {
           this.csvUG = ug.data.data
           return
         }
       } catch {}
-      // 回退 CSV
-      const ugCsv = await this.fetchCsv('/data/university_grades.csv')
+      const ugCsv = await this.fetchCsv(`/data/${gradesTable}.csv`)
       this.csvUG = ugCsv
     },
     async fetchCsv(url) {
@@ -325,22 +353,17 @@ export default {
     },
     buildDetailFromCsv(studentId) {
       const sid = String(studentId)
-      // 仅基于 UG 构造最小反馈（profile 可能为空，仅展示 ID）
       const student = null
       const ug = this.csvUG.find(r => String(r.student_id) === sid) || null
-
-      // 兼容新旧列：生成一次/二次/三次与平均
       const grades = ug ? { ...ug } : null
       if (grades) {
         const toNum = (x) => {
           const v = Number(x)
           return isNaN(v) ? null : v
         }
-        // 规范化尝试
         grades.first_calculus_score = grades.first_calculus_score != null ? toNum(grades.first_calculus_score) : toNum(grades.calculus_score)
         grades.second_calculus_score = grades.second_calculus_score != null ? toNum(grades.second_calculus_score) : null
         grades.third_calculus_score = grades.third_calculus_score != null ? toNum(grades.third_calculus_score) : null
-        // 计算平均（优先三次的平均；否则回退 total_score / calculus_score）
         const parts = [grades.first_calculus_score, grades.second_calculus_score, grades.third_calculus_score].filter(v => v !== null && v !== undefined)
         if (parts.length > 0) {
           grades.calculus_avg_score = Number((parts.reduce((a,b)=>a+b,0) / parts.length).toFixed(2))
@@ -349,8 +372,6 @@ export default {
           grades.calculus_avg_score = fallbackAvg
         }
       }
-
-      // 计算分位（对高数平均分）
       const percentiles = {}
       if (grades && grades.calculus_avg_score != null) {
         const pool = this.csvUG.map(r => {
@@ -365,8 +386,6 @@ export default {
         const le = pool.filter(x => x <= v).length
         percentiles.calculus_avg_score = cnt ? (le / cnt * 100) : null
       }
-
-      // 学习因素
       const factors = []
       if (ug) {
         const fMap = [
@@ -380,7 +399,6 @@ export default {
           factors.push({ name: f.name, value: isNaN(val) ? null : val })
         }
       }
-
       return {
         profile: student,
         grades,
@@ -423,18 +441,14 @@ export default {
       const attemptAvg = this.classStats.attemptAvg
       const hours = toNum(g.study_hours)
       const avgHours = this.classStats.avgHours
-
-      // 1) 成绩趋势反馈：判断稳步上升/波动大，并估算预测分
       let trendTexts = []
       let predicted = avgScore
       if (attempts.length >= 2) {
-        // 简单线性外推（限制到20-100）
         const last = attempts[attempts.length-1]
         const prev = attempts[attempts.length-2]
         const delta = last - prev
         predicted = Math.min(100, Math.max(20, last + 0.8 * delta))
       }
-      // 稳步上升：单调递增且每次提升>=2分，或总体正增且波动小
       const inc12 = (second!=null && first!=null) ? (second - first) : null
       const inc23 = (third!=null && second!=null) ? (third - second) : null
       const steadilyUp = (inc12!=null && inc23!=null && inc12>=2 && inc23>=2) ||
@@ -448,8 +462,6 @@ export default {
         trendTexts.push(`当前预测分约为 ${predicted.toFixed(1)}，班级均分约为 ${classAvg.toFixed(1)}。`)
       }
       this.trendFeedback = trendTexts
-
-      // 2) 薄弱环节定位：连续3次低于班级对应均值
       let weakTexts = []
       let belowCnt = 0
       if (first!=null && attemptAvg.first!=null && first < attemptAvg.first) belowCnt++
@@ -458,13 +470,10 @@ export default {
       if (belowCnt >= 3) {
         weakTexts.push('高数成绩连续3次低于班级平均，且预测分仍处于下游，是你的薄弱科目，需优先分配更多学习时间。')
       }
-      // 若平均分显著低于班均（>5分），也提示
       if (avgScore!=null && classAvg!=null && avgScore < classAvg - 5) {
         weakTexts.push(`你的高数平均分 ${avgScore.toFixed(1)} 低于班级均分 ${classAvg.toFixed(1)}，建议优先补强基础知识点。`)
       }
       this.weaknessFeedback = weakTexts
-
-      // 3) 个性化提升建议：学习时长对比 + 其他因子
       let sugg = []
       if (hours!=null && avgHours!=null && hours < avgHours) {
         const incPerDay = 1
@@ -473,7 +482,6 @@ export default {
         const avgH = avgHours.toFixed(1)
         sugg.push(`每周学习时长仅 ${stuH} 小时，低于班级平均 ${avgH} 小时，建议每天增加 ${incPerDay} 小时专项练习。`)
       }
-      // 出勤、作业、刷题的低阈值提示
       const f = Array.isArray(this.detail.factors) ? this.detail.factors : []
       const val = (name) => { const it = f.find(x=>x.name===name); return it ? Number(it.value) : null }
       const att = val('出勤次数'), hw = val('作业分数'), prac = val('刷题数')
