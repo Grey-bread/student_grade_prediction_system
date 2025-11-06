@@ -15,6 +15,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder
+from pandas.api.types import is_datetime64_any_dtype
 
 def preprocess_df(df: pd.DataFrame, missing_strategy: str = 'mean', outlier_strategy: str = 'iqr'):
     """对输入数据进行通用预处理。
@@ -26,9 +27,33 @@ def preprocess_df(df: pd.DataFrame, missing_strategy: str = 'mean', outlier_stra
     """
     df = df.drop_duplicates()
 
-    # -------- 1) 先把所有 numeric 列统一 float 化（最关键） --------
+    # -------- 1) 处理时间列并统一数值列为 float（最关键） --------
+    # 1.1 将 datetime 列转换为数值（以“自1970-01-01起的天数”为单位），便于模型训练
+    dt_cols = []
+    for c in df.columns:
+        try:
+            if is_datetime64_any_dtype(df[c]):
+                dt_cols.append(c)
+            # 某些场景列类型是 object 但实际是日期字符串，这里不强转，交由后续 LabelEncoder/保留；
+            # 只对已是 datetime64 的列做数值化，避免误伤纯文本。
+        except Exception:
+            continue
+    for c in dt_cols:
+        try:
+            # 转换为天为单位的浮点数（NaT -> NaN）
+            base = pd.Timestamp('1970-01-01')
+            df[c] = ((df[c] - base) / pd.Timedelta(days=1)).astype('float64')
+        except Exception:
+            # 若异常，回退为字符串再做标签编码阶段处理
+            df[c] = df[c].astype(str)
+
+    # 1.2 统一数值列类型为 float64
     numeric_cols = df.select_dtypes(include=['int64','float64']).columns.tolist()
     df[numeric_cols] = df[numeric_cols].astype('float64')
+    # 将时间列纳入数值列集合，方便后续缺失/异常处理
+    for c in dt_cols:
+        if c not in numeric_cols and c in df.columns and df[c].dtype.kind in ('i', 'u', 'f'):
+            numeric_cols = list(numeric_cols) + [c]
 
     # -------- 2) 缺失值填充 --------
     for col in df.columns:

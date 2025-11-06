@@ -4,29 +4,20 @@
       <template #header>
         <div class="card-header">
           <h2>学生反馈</h2>
-          <span class="sub">基于数据库数据生成个性化建议</span>
+          <span class="sub">后端可用则走接口；不可用时直接读取 CSV</span>
         </div>
       </template>
 
-      <!-- 查询条件 -->
+      <!-- 查询条件（基于新数据集：students / university_grades） -->
       <el-form :inline="true" :model="query" class="query-form">
+        <el-form-item label="按学号/姓名选择">
+          <el-select v-model="query.selectedStudent" filterable clearable placeholder="输入学号或姓名搜索"
+                     style="width: 300px;" @focus="ensureStudentsLoadedPreferBackend" @change="onSelectStudent">
+            <el-option v-for="s in studentsList" :key="s.student_id" :label="`${s.student_no || '—'} - ${s.name || '—'}`" :value="s.student_id" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="学生ID">
-          <el-input v-model="query.studentId" placeholder="请输入学生ID" style="width: 200px;" @change="onQueryChange" />
-        </el-form-item>
-        <el-form-item label="姓名">
-          <el-input v-model="query.studentName" placeholder="可输入姓名查询" style="width: 180px;" @change="onQueryChange" />
-        </el-form-item>
-        <el-form-item label="成绩表">
-          <el-select v-model="selectedGradesTable" placeholder="选择用于分析的成绩表" clearable style="width: 240px;">
-            <el-option v-for="t in availableTables" :key="t" :label="getTableDisplayName(t)" :value="t">
-              <span>{{ getTableDisplayName(t) }}</span>
-            </el-option>
-          </el-select>
-        </el-form-item>
-        <el-form-item label="课程">
-          <el-select v-model="query.courseId" placeholder="该生参与过的课程" clearable style="width: 240px;">
-            <el-option v-for="c in courseOptions" :key="c.course_id" :label="`${c.course_name} (${c.course_id})`" :value="c.course_id" />
-          </el-select>
+          <el-input v-model="query.studentId" placeholder="或直接输入学生ID" style="width: 200px;" />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="loading" @click="loadFeedback">生成反馈</el-button>
@@ -37,7 +28,7 @@
   <el-skeleton v-if="loading" :rows="6" animated />
       
   <!-- 未加载数据 -->
-  <el-empty v-else-if="!feedback" description="请先输入学生ID并生成反馈" />
+  <el-empty v-else-if="!hasDetail" description="请先通过上方“学号/姓名选择”或输入学生ID，点击生成反馈" />
 
   <!-- 展示反馈详情 -->
   <div v-else>
@@ -49,104 +40,78 @@
             </div>
           </template>
           <div class="info">
-            <el-tag type="info">ID: {{ feedback.student?.student_id || query.studentId }}</el-tag>
-            <el-tag>{{ feedback.student?.name || '—' }}</el-tag>
-            <el-tag type="success">{{ feedback.student?.gender || '—' }}</el-tag>
-            <el-tag type="warning">{{ feedback.student?.grade || '—' }}</el-tag>
-            <el-tag type="primary">{{ feedback.student?.class || '—' }}</el-tag>
+            <el-tag type="info">ID: {{ (detail.profile && detail.profile.student_id) || query.studentId }}</el-tag>
+            <el-tag>{{ (detail.profile && detail.profile.name) || '—' }}</el-tag>
+            <el-tag type="success">{{ (detail.profile && detail.profile.gender) || '—' }}</el-tag>
+            <el-tag type="warning">{{ (detail.profile && detail.profile.grade) || '—' }}</el-tag>
+            <el-tag type="primary">{{ (detail.profile && detail.profile.class) || '—' }}</el-tag>
           </div>
         </el-card>
 
-        <!-- 成绩概览 -->
+        <!-- 成绩概览（来自 university_grades，新：一二三次 + 平均） -->
         <el-row :gutter="16" class="kpis">
-          <el-col :span="12">
+          <el-col :span="6">
             <el-card class="kpi-card" shadow="hover">
-              <div class="kpi-title">平均总评</div>
-              <div class="kpi-value">{{ formatScore(feedback.overview?.avg_total_score) }}</div>
+              <div class="kpi-title">高数平均分</div>
+              <div class="kpi-value">{{ formatScore(detail.grades?.calculus_avg_score) }}</div>
+              <div class="kpi-sub">分位：{{ formatScore(detail.percentiles?.calculus_avg_score) }}%</div>
             </el-card>
           </el-col>
-          <el-col :span="12">
+          <el-col :span="6">
             <el-card class="kpi-card" shadow="hover">
-              <div class="kpi-title">最近总评</div>
-              <div class="kpi-value">{{ formatScore(feedback.overview?.latest_total_score) }}</div>
+              <div class="kpi-title">高数第一次</div>
+              <div class="kpi-value">{{ formatScore(detail.grades?.first_calculus_score) }}</div>
+            </el-card>
+          </el-col>
+          <el-col :span="6">
+            <el-card class="kpi-card" shadow="hover">
+              <div class="kpi-title">高数第二次</div>
+              <div class="kpi-value">{{ formatScore(detail.grades?.second_calculus_score) }}</div>
+            </el-card>
+          </el-col>
+          <el-col :span="6">
+            <el-card class="kpi-card" shadow="hover">
+              <div class="kpi-title">高数第三次</div>
+              <div class="kpi-value">{{ formatScore(detail.grades?.third_calculus_score) }}</div>
             </el-card>
           </el-col>
         </el-row>
 
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-card class="section-card">
-              <template #header><div class="section-header">按课程的平均成绩</div></template>
-              <el-table :data="feedback.overview?.by_course || []" size="small" border stripe>
-                <el-table-column prop="course_name" label="课程" width="120" />
-                <el-table-column prop="midterm_score" label="期中" width="90" />
-                <el-table-column prop="final_score" label="期末" width="90" />
-                <el-table-column prop="usual_score" label="平时" width="90" />
-                <el-table-column prop="total_score" label="总评" width="90" />
-              </el-table>
-            </el-card>
-          </el-col>
-          <el-col :span="12">
-            <el-card class="section-card">
-              <template #header><div class="section-header">最近一次考试（每门课）</div></template>
-              <el-table :data="feedback.latest_exams || []" size="small" border stripe>
-                <el-table-column prop="course_name" label="课程" width="120" />
-                <el-table-column prop="exam_name" label="考试" />
-                <el-table-column prop="exam_date" label="日期" width="120" />
-                <el-table-column prop="score" label="分数" width="90" />
-                <el-table-column prop="score_level" label="等级" width="90" />
-              </el-table>
-            </el-card>
-          </el-col>
-        </el-row>
-
-        <!-- 课堂表现对比 -->
-        <el-card class="section-card">
-          <template #header><div class="section-header">课堂表现：学生 vs 班级平均</div></template>
-          <div class="perf-grid">
-            <div v-for="item in perfItems" :key="item.key" class="perf-item">
-              <div class="perf-title">{{ item.label }}</div>
-              <div class="bars">
-                <div class="bar">
-                  <span class="bar-label">学生</span>
-                  <el-progress :percentage="toPct(feedback.performance?.student_avg?.[item.key])" :stroke-width="10" status="success" />
-                </div>
-                <div class="bar">
-                  <span class="bar-label">班级</span>
-                  <el-progress :percentage="toPct(feedback.performance?.class_avg?.[item.key])" :stroke-width="10" />
-                </div>
-              </div>
-            </div>
+        <!-- 学习投入（简化为标签展示） -->
+        <el-card class="section-card" v-if="(detail.factors || []).length">
+          <template #header><div class="section-header">学习投入</div></template>
+          <div class="info">
+            <el-tag v-for="f in detail.factors" :key="f.name" type="info" class="pill">{{ f.name }}：{{ f.value ?? '—' }}</el-tag>
           </div>
         </el-card>
 
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-card class="section-card">
-              <template #header><div class="section-header">优势</div></template>
-              <div>
-                <el-empty v-if="!feedback.strengths || feedback.strengths.length === 0" description="暂无" />
-                <el-tag v-for="(s, idx) in feedback.strengths" :key="idx" type="success" effect="plain" class="pill">{{ s }}</el-tag>
-              </div>
-            </el-card>
-          </el-col>
-          <el-col :span="12">
-            <el-card class="section-card">
-              <template #header><div class="section-header">待提升</div></template>
-              <div>
-                <el-empty v-if="!feedback.weaknesses || feedback.weaknesses.length === 0" description="暂无" />
-                <el-tag v-for="(w, idx) in feedback.weaknesses" :key="idx" type="warning" effect="plain" class="pill">{{ w }}</el-tag>
-              </div>
-            </el-card>
-          </el-col>
-        </el-row>
-
+        <!-- 成绩趋势反馈 -->
         <el-card class="section-card">
-          <template #header><div class="section-header">个性化建议</div></template>
-          <el-empty v-if="!feedback.suggestions || feedback.suggestions.length === 0" description="暂无建议" />
-          <el-timeline v-else>
-            <el-timeline-item v-for="(s, idx) in feedback.suggestions" :key="idx" :timestamp="`建议 ${idx+1}`" type="primary">{{ s }}</el-timeline-item>
-          </el-timeline>
+          <template #header><div class="section-header">成绩趋势反馈</div></template>
+          <div v-if="trendFeedback.length">
+            <p v-for="(t, i) in trendFeedback" :key="i" style="margin:6px 0;">{{ t }}</p>
+          </div>
+          <el-empty v-else description="暂无趋势结论" />
+        </el-card>
+
+        <!-- 薄弱环节定位 -->
+        <el-card class="section-card">
+          <template #header><div class="section-header">薄弱环节定位</div></template>
+          <div v-if="weaknessFeedback.length">
+            <p v-for="(t, i) in weaknessFeedback" :key="i" style="margin:6px 0;">{{ t }}</p>
+          </div>
+          <el-empty v-else description="未发现明显薄弱环节" />
+        </el-card>
+
+        <!-- 个性化提升建议 -->
+        <el-card class="section-card">
+          <template #header><div class="section-header">个性化提升建议</div></template>
+          <div v-if="suggestionFeedback.length">
+            <el-timeline>
+              <el-timeline-item v-for="(s, idx) in suggestionFeedback" :key="idx" :timestamp="`建议 ${idx+1}`" type="primary">{{ s }}</el-timeline-item>
+            </el-timeline>
+          </div>
+          <el-empty v-else description="暂无建议" />
         </el-card>
       </div>
     </el-card>
@@ -166,130 +131,97 @@ export default {
       query: {
         studentId: '',
         studentName: '',
-        courseId: null
+        courseId: null,
+        selectedStudent: null
       },
-      availableTables: [],
-      selectedGradesTable: '',
-      feedback: null,
-      courseOptions: [],
-      perfItems: [
-        { key: 'attendance_score', label: '出勤' },
-        { key: 'participation_score', label: '课堂参与' },
-        { key: 'homework_score', label: '作业完成' },
-        { key: 'behavior_score', label: '课堂纪律/行为' },
-        { key: 'total_performance_score', label: '综合表现' },
-      ]
+      // 本地 CSV 容器（仅使用 UG，students 缺失也可渲染）
+      csvUG: [],
+      studentsList: [],
+      detail: { profile: null, grades: null, percentiles: null, factors: [] },
+      trendFeedback: [],
+      weaknessFeedback: [],
+      suggestionFeedback: [],
+      classStats: { avgScore: null, avgHours: null, attemptAvg: { first: null, second: null, third: null } },
+      
+    }
+  },
+  computed: {
+    hasDetail() {
+      return !!(this.detail && (this.detail.grades || this.detail.profile))
     }
   },
   mounted() {
-    // 初始不加载课程，待输入学号或姓名后联动加载
-    this.fetchTables()
+    // 预加载学生清单，便于直接搜索选择；失败不影响手动输入ID
+    this.ensureStudentsLoadedPreferBackend().catch(()=>{})
   },
   methods: {
-    getTableDisplayName(name) {
-      const map = {
-        students: '学生信息表',
-        historical_grades: '历史成绩表',
-        exam_scores: '考试成绩表',
-        class_performance: '课堂表现表',
-        courses: '课程信息表',
-        exam_types: '考试类型表',
-        upload_history: '上传历史',
-        data_sources: '数据源',
-        collection_tasks: '采集任务',
-        table_column_mapping: '列名映射',
-        data_sync_state: '数据同步状态'
-      }
-      if (map[name]) return map[name]
-      if (/[^\x00-\x7F]/.test(String(name))) return name
-      return this.translateTableName(name)
-    },
-    translateTableName(name) {
-      const dict = {
-        'students': '学生', 'student': '学生',
-        'exam': '考试', 'exams': '考试',
-        'score': '成绩', 'scores': '成绩',
-        'class': '课堂', 'classes': '课堂',
-        'performance': '表现',
-        'historical': '历史', 'history': '历史',
-        'grade': '成绩', 'grades': '成绩',
-        'course': '课程', 'courses': '课程',
-        'teacher': '教师', 'teachers': '教师',
-        'type': '类型', 'types': '类型',
-        'record': '记录', 'records': '记录',
-        'upload': '上传', 'data': '数据', 'source': '来源', 'mapping': '映射',
-        'sync': '同步', 'state': '状态', 'status': '状态'
-      }
-      const parts = String(name).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
-      const cn = parts.map(p => dict[p]).filter(Boolean)
-      if (cn.length) return cn.join('') + '表'
-      return '自定义表'
-    },
-    async fetchTables() {
+    async ensureStudentsLoadedPreferBackend() {
+      if (this.studentsList.length) return
+      // 先后端，再 CSV
       try {
-        const res = await axios.get('/api/analysis/tables')
-        if (res.data?.status === 'success') {
-          this.availableTables = res.data.tables || []
-          if (!this.selectedGradesTable) {
-            if (this.availableTables.includes('historical_grades')) this.selectedGradesTable = 'historical_grades'
-          }
+        const res = await axios.get('/api/analysis/table-data', { params: { table: 'students', page: 1, page_size: 10000 } })
+        if (res.data?.status === 'success' && Array.isArray(res.data.data)) {
+          this.studentsList = res.data.data
+          return
         }
-      } catch (e) {
-        console.warn('获取表清单失败', e)
-      }
-    },
-    async loadCourses() {
+      } catch {}
       try {
-        const res = await axios.get('/api/analysis/student-courses', {
-          params: {
-            student_id: this.query.studentId || undefined,
-            student_name: this.query.studentName || undefined
-          }
-        })
-        if (res.data?.status === 'success') {
-          this.courseOptions = res.data.courses || []
-          // 若未填写学号但通过姓名解析出学生，则回填学号，便于后续生成反馈
-          const resolved = res.data.resolved_student
-          if (resolved && !this.query.studentId && resolved.student_id) {
-            this.query.studentId = String(resolved.student_id)
-          }
-        } else {
-          this.courseOptions = []
-        }
+        const rows = await this.fetchCsv('/data/students.csv')
+        // 只保留关键列
+        this.studentsList = rows.map(r => ({
+          student_id: r.student_id,
+          student_no: r.student_no,
+          name: r.name,
+          gender: r.gender,
+          grade: r.grade,
+          class: r.class,
+        }))
       } catch (e) {
-        this.courseOptions = []
-        console.warn('加载该生参与课程失败', e)
+        // 忽略，仍可手输ID
       }
     },
-    onQueryChange() {
-      // 当学号或姓名变化时联动刷新课程下拉
-      this.loadCourses()
+    onSelectStudent(val) {
+      // val 为选中的 student_id
+      this.query.studentId = String(val || '')
     },
     async loadFeedback() {
-      // 若仅输入了姓名，尝试解析学号
-      if (!this.query.studentId && this.query.studentName) {
-        await this.loadCourses()
-      }
       if (!this.query.studentId) {
-        ElMessage.warning('请先输入学生ID或姓名以定位学生')
+        ElMessage.warning('请先通过“学号/姓名选择”或直接输入学生ID')
         return
       }
       this.loading = true
-      this.feedback = null
+      this.detail = { profile: null, grades: null, percentiles: null, factors: [] }
+      this.trendFeedback = []
+      this.weaknessFeedback = []
+      this.suggestionFeedback = []
       try {
-        const res = await axios.get('/api/analysis/student-feedback', {
-          params: {
-            student_id: this.query.studentId,
-            course_id: this.query.courseId || undefined,
-            grades_table: this.selectedGradesTable || undefined
+        // 1) 优先尝试后端接口
+        let usedBackend = false
+        try {
+          const res = await axios.get('/api/analysis/student-detail', { params: { student_id: this.query.studentId } })
+          if (res.data?.status === 'success') {
+            usedBackend = true
+            this.detail = {
+              profile: res.data.profile || null,
+              grades: res.data.grades || null,
+              percentiles: res.data.percentiles || null,
+              factors: Array.isArray(res.data.factors) ? res.data.factors : []
+            }
           }
-        })
-        if (res.data?.status === 'success') {
-          this.feedback = res.data
-          ElMessage.success('已生成反馈')
-        } else {
-          throw new Error(res.data?.message || '生成反馈失败')
+        } catch (e) {
+          // 忽略，走 CSV 回退
         }
+
+        // 加载班级对比数据（无论是否用后端详情，仍需UG数据做均值对比）
+        await this.ensureUGLoadedPreferBackend()
+        if (!usedBackend) {
+          // 后端不可用，基于 CSV 构造详情
+          this.detail = this.buildDetailFromCsv(String(this.query.studentId).trim())
+        }
+        // 计算班级均值并生成三块反馈
+        this.computeClassStats()
+        this.buildThreeDimensionFeedback()
+        ElMessage.success('已生成反馈')
       } catch (e) {
         console.error(e)
         ElMessage.error(`生成反馈失败：${e.message}`)
@@ -297,11 +229,201 @@ export default {
         this.loading = false
       }
     },
-    toPct(val) {
-      const num = parseFloat(val)
-      if (isNaN(num)) return 0
-      // 分数假定满分100
-      return Math.max(0, Math.min(100, Math.round(num)))
+    async ensureUGLoadedPreferBackend() {
+      if (this.csvUG.length) return
+      // 先尝试后端表数据
+      try {
+        const ug = await axios.get('/api/analysis/table-data', { params: { table: 'university_grades', page: 1, page_size: 10000 } })
+        if (ug.data?.status === 'success' && Array.isArray(ug.data.data) && ug.data.data.length) {
+          this.csvUG = ug.data.data
+          return
+        }
+      } catch {}
+      // 回退 CSV
+      const ugCsv = await this.fetchCsv('/data/university_grades.csv')
+      this.csvUG = ugCsv
+    },
+    async fetchCsv(url) {
+      const res = await fetch(url, { cache: 'no-store' })
+      if (!res.ok) throw new Error(`无法读取 ${url}`)
+      const text = await res.text()
+      return this.parseCsv(text)
+    },
+    parseCsv(text) {
+      const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.trim().length)
+      if (!lines.length) return []
+      const header = lines[0].split(',').map(h => h.trim())
+      const rows = []
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(',')
+        if (!parts.length || parts.length < header.length) continue
+        const obj = {}
+        header.forEach((h, idx) => {
+          obj[h] = parts[idx] !== undefined ? parts[idx] : ''
+        })
+        rows.push(obj)
+      }
+      return rows
+    },
+    buildDetailFromCsv(studentId) {
+      const sid = String(studentId)
+      // 仅基于 UG 构造最小反馈（profile 可能为空，仅展示 ID）
+      const student = null
+      const ug = this.csvUG.find(r => String(r.student_id) === sid) || null
+
+      // 兼容新旧列：生成一次/二次/三次与平均
+      const grades = ug ? { ...ug } : null
+      if (grades) {
+        const toNum = (x) => {
+          const v = Number(x)
+          return isNaN(v) ? null : v
+        }
+        // 规范化尝试
+        grades.first_calculus_score = grades.first_calculus_score != null ? toNum(grades.first_calculus_score) : toNum(grades.calculus_score)
+        grades.second_calculus_score = grades.second_calculus_score != null ? toNum(grades.second_calculus_score) : null
+        grades.third_calculus_score = grades.third_calculus_score != null ? toNum(grades.third_calculus_score) : null
+        // 计算平均（优先三次的平均；否则回退 total_score / calculus_score）
+        const parts = [grades.first_calculus_score, grades.second_calculus_score, grades.third_calculus_score].filter(v => v !== null && v !== undefined)
+        if (parts.length > 0) {
+          grades.calculus_avg_score = Number((parts.reduce((a,b)=>a+b,0) / parts.length).toFixed(2))
+        } else {
+          const fallbackAvg = toNum(grades.total_score) ?? toNum(grades.calculus_score)
+          grades.calculus_avg_score = fallbackAvg
+        }
+      }
+
+      // 计算分位（对高数平均分）
+      const percentiles = {}
+      if (grades && grades.calculus_avg_score != null) {
+        const pool = this.csvUG.map(r => {
+          const a = [Number(r.first_calculus_score), Number(r.second_calculus_score), Number(r.third_calculus_score)].filter(x=>!isNaN(x))
+          if (a.length) return a.reduce((p,c)=>p+c,0)/a.length
+          const t = Number(r.total_score)
+          const c = Number(r.calculus_score)
+          return !isNaN(t) ? t : (!isNaN(c) ? c : NaN)
+        }).filter(x => !isNaN(x))
+        const v = Number(grades.calculus_avg_score)
+        const cnt = pool.length
+        const le = pool.filter(x => x <= v).length
+        percentiles.calculus_avg_score = cnt ? (le / cnt * 100) : null
+      }
+
+      // 学习因素
+      const factors = []
+      if (ug) {
+        const fMap = [
+          { key: 'study_hours', name: '学习时长' },
+          { key: 'attendance_count', name: '出勤次数' },
+          { key: 'homework_score', name: '作业分数' },
+          { key: 'practice_count', name: '刷题数' },
+        ]
+        for (const f of fMap) {
+          const val = Number(ug[f.key])
+          factors.push({ name: f.name, value: isNaN(val) ? null : val })
+        }
+      }
+
+      return {
+        profile: student,
+        grades,
+        percentiles,
+        factors
+      }
+    },
+    computeClassStats() {
+      if (!Array.isArray(this.csvUG) || !this.csvUG.length) return
+      const toNum = (v) => { const n = Number(v); return isNaN(n) ? null : n }
+      const nums = this.csvUG.map(r => {
+        const parts = [toNum(r.first_calculus_score), toNum(r.second_calculus_score), toNum(r.third_calculus_score)].filter(v => v!=null)
+        const avg = parts.length ? parts.reduce((a,b)=>a+b,0)/parts.length : (toNum(r.calculus_avg_score) ?? toNum(r.total_score) ?? toNum(r.calculus_score))
+        return avg
+      }).filter(v => v!=null)
+      const hoursArr = this.csvUG.map(r => toNum(r.study_hours)).filter(v=>v!=null)
+      const firstArr = this.csvUG.map(r => toNum(r.first_calculus_score)).filter(v=>v!=null)
+      const secondArr = this.csvUG.map(r => toNum(r.second_calculus_score)).filter(v=>v!=null)
+      const thirdArr = this.csvUG.map(r => toNum(r.third_calculus_score)).filter(v=>v!=null)
+      const avg = (arr) => arr.length ? (arr.reduce((a,b)=>a+b,0)/arr.length) : null
+      this.classStats = {
+        avgScore: avg(nums),
+        avgHours: avg(hoursArr),
+        attemptAvg: {
+          first: avg(firstArr),
+          second: avg(secondArr),
+          third: avg(thirdArr)
+        }
+      }
+    },
+    buildThreeDimensionFeedback() {
+      const g = this.detail.grades || {}
+      const toNum = (v) => { const n = Number(v); return isNaN(n) ? null : n }
+      const first = toNum(g.first_calculus_score ?? g.calculus_score)
+      const second = toNum(g.second_calculus_score)
+      const third = toNum(g.third_calculus_score)
+      const avgScore = toNum(g.calculus_avg_score ?? g.total_score ?? g.calculus_score)
+      const attempts = [first, second, third].filter(v=>v!=null)
+      const classAvg = this.classStats.avgScore
+      const attemptAvg = this.classStats.attemptAvg
+      const hours = toNum(g.study_hours)
+      const avgHours = this.classStats.avgHours
+
+      // 1) 成绩趋势反馈：判断稳步上升/波动大，并估算预测分
+      let trendTexts = []
+      let predicted = avgScore
+      if (attempts.length >= 2) {
+        // 简单线性外推（限制到20-100）
+        const last = attempts[attempts.length-1]
+        const prev = attempts[attempts.length-2]
+        const delta = last - prev
+        predicted = Math.min(100, Math.max(20, last + 0.8 * delta))
+      }
+      // 稳步上升：单调递增且每次提升>=2分，或总体正增且波动小
+      const inc12 = (second!=null && first!=null) ? (second - first) : null
+      const inc23 = (third!=null && second!=null) ? (third - second) : null
+      const steadilyUp = (inc12!=null && inc23!=null && inc12>=2 && inc23>=2) ||
+                         (attempts.length>=2 && (attempts[attempts.length-1] - attempts[0] >= 4) && (Math.max(...attempts)-Math.min(...attempts) <= 12))
+      const volatile = attempts.length>=2 && (Math.max(...attempts)-Math.min(...attempts) >= 15)
+      if (steadilyUp && classAvg!=null && predicted!=null && predicted >= classAvg) {
+        trendTexts.push('你的成绩持续进步，学习状态良好，预测后续能保持优势，建议继续维持当前学习节奏。')
+      } else if (volatile && classAvg!=null && predicted!=null && predicted < classAvg) {
+        trendTexts.push('成绩稳定性不足，可能受知识点掌握不扎实或学习方法影响，需重点关注波动原因，针对性调整。')
+      } else if (predicted!=null && classAvg!=null) {
+        trendTexts.push(`当前预测分约为 ${predicted.toFixed(1)}，班级均分约为 ${classAvg.toFixed(1)}。`)
+      }
+      this.trendFeedback = trendTexts
+
+      // 2) 薄弱环节定位：连续3次低于班级对应均值
+      let weakTexts = []
+      let belowCnt = 0
+      if (first!=null && attemptAvg.first!=null && first < attemptAvg.first) belowCnt++
+      if (second!=null && attemptAvg.second!=null && second < attemptAvg.second) belowCnt++
+      if (third!=null && attemptAvg.third!=null && third < attemptAvg.third) belowCnt++
+      if (belowCnt >= 3) {
+        weakTexts.push('高数成绩连续3次低于班级平均，且预测分仍处于下游，是你的薄弱科目，需优先分配更多学习时间。')
+      }
+      // 若平均分显著低于班均（>5分），也提示
+      if (avgScore!=null && classAvg!=null && avgScore < classAvg - 5) {
+        weakTexts.push(`你的高数平均分 ${avgScore.toFixed(1)} 低于班级均分 ${classAvg.toFixed(1)}，建议优先补强基础知识点。`)
+      }
+      this.weaknessFeedback = weakTexts
+
+      // 3) 个性化提升建议：学习时长对比 + 其他因子
+      let sugg = []
+      if (hours!=null && avgHours!=null && hours < avgHours) {
+        const incPerDay = 1
+        const diff = (avgHours - hours)
+        const stuH = hours.toFixed(1)
+        const avgH = avgHours.toFixed(1)
+        sugg.push(`每周学习时长仅 ${stuH} 小时，低于班级平均 ${avgH} 小时，建议每天增加 ${incPerDay} 小时专项练习。`)
+      }
+      // 出勤、作业、刷题的低阈值提示
+      const f = Array.isArray(this.detail.factors) ? this.detail.factors : []
+      const val = (name) => { const it = f.find(x=>x.name===name); return it ? Number(it.value) : null }
+      const att = val('出勤次数'), hw = val('作业分数'), prac = val('刷题数')
+      if (att!=null && att < 70) sugg.push('出勤次数偏低，建议保证按时到课并积极参与课堂，提升学习效率。')
+      if (hw!=null && hw < 75) sugg.push('作业得分偏低，建议规范书写、按时完成，并针对错题及时复盘。')
+      if (prac!=null && prac < 30) sugg.push('刷题数量不足，建议增加针对性训练，优先突破薄弱题型。')
+      if (!sugg.length) sugg.push('维持当前学习节奏与方法，可尝试挑战更高难度题目以巩固优势。')
+      this.suggestionFeedback = sugg
     },
     formatScore(val) {
       return (val === null || val === undefined || isNaN(Number(val))) ? '—' : Number(val).toFixed(1)
@@ -322,12 +444,8 @@ export default {
 .kpi-card { text-align: center; }
 .kpi-title { color: #909399; font-size: 13px; }
 .kpi-value { font-size: 28px; font-weight: 700; color: #303133; }
-.perf-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
-.perf-item { padding: 8px 0; }
-.perf-title { margin-bottom: 6px; font-weight: 600; }
-.bars { display: flex; flex-direction: column; gap: 8px; }
-.bar { display: grid; grid-template-columns: 60px 1fr; align-items: center; gap: 8px; }
-.bar-label { color: #909399; font-size: 12px; }
+.kpi-sub { margin-top: 6px; font-size: 12px; color: #909399; }
+.perf-grid { display: none; }
 .pill { margin: 4px; }
 @media (max-width: 768px) {
   .perf-grid { grid-template-columns: 1fr; }

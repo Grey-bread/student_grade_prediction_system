@@ -46,6 +46,508 @@ def mark_table_dirty(table_name: str):
         # 兜底，避免影响主流程
         pass
 
+# -----------------------------
+# New analytics for new datasets (university_grades, students)
+# -----------------------------
+
+@analysis_bp.route('/ug/effort-vs-score', methods=['GET'])
+def ug_effort_vs_score():
+    """Scatter: study_hours vs calculus_avg_score (new) for university_grades.
+    Params: table (default 'university_grades'), x (default 'study_hours'), y (default 'calculus_avg_score').
+    向后兼容：若不存在 calculus_avg_score，将自动降级为可用的分数字段（total_score 或 calculus_score 等）。
+    """
+    try:
+        table = request.args.get('table', 'university_grades')
+        x_col = request.args.get('x', 'study_hours')
+        y_col = request.args.get('y', 'calculus_avg_score')
+        df = get_table_data(table)
+        if df is None or df.empty:
+            return jsonify({'status': 'success', 'points': [], 'count': 0, 'x': x_col, 'y': y_col}), 200
+        # auto fallback for columns
+        cols = set(df.columns.astype(str))
+        if x_col not in cols:
+            cand = [c for c in cols if 'hour' in c.lower() or 'study' in c.lower()]
+            x_col = cand[0] if cand else next(iter(cols))
+        if y_col not in cols:
+            # 优先平均分，再降级到总分或单科分
+            preferred = [
+                'calculus_avg_score', 'avg_calculus', 'calculus_average',
+                'total_score', 'overall_score', 'calculus_score'
+            ]
+            cand = [c for c in preferred if c in cols]
+            if not cand:
+                cand = [c for c in cols if 'score' in c.lower()]
+            y_col = cand[0] if cand else next(iter(cols))
+
+        x = pd.to_numeric(df.get(x_col), errors='coerce')
+        y = pd.to_numeric(df.get(y_col), errors='coerce')
+        mask = x.notna() & y.notna()
+        points = [{'x': float(xv), 'y': float(yv)} for xv, yv in zip(x[mask], y[mask])]
+
+        # optional quick stats
+        corr = None
+        try:
+            if mask.sum() >= 3:
+                corr = float(pd.Series(x[mask]).corr(pd.Series(y[mask])))
+        except Exception:
+            corr = None
+
+        return jsonify({'status': 'success', 'points': points, 'count': len(points), 'x': x_col, 'y': y_col, 'corr': corr}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@analysis_bp.route('/ug/score-by-effort-bucket', methods=['GET'])
+def ug_score_by_effort_bucket():
+    """Bar: avg calculus_avg_score by study_hours buckets (quantiles).
+    Params: table (default 'university_grades'), hours='study_hours', score='calculus_avg_score', buckets=5
+    若无平均分列，将自动回退到 total_score 或其他分数字段。
+    """
+    try:
+        table = request.args.get('table', 'university_grades')
+        h_col = request.args.get('hours', 'study_hours')
+        s_col = request.args.get('score', 'calculus_avg_score')
+        buckets = int(request.args.get('buckets', 5))
+        df = get_table_data(table)
+        if df is None or df.empty:
+            return jsonify({'status': 'success', 'labels': [], 'avg': [], 'count': []}), 200
+
+        hours = pd.to_numeric(df.get(h_col), errors='coerce')
+        score = pd.to_numeric(df.get(s_col), errors='coerce')
+        mask = hours.notna() & score.notna()
+        if mask.sum() == 0:
+            return jsonify({'status': 'success', 'labels': [], 'avg': [], 'count': []}), 200
+
+        # quantile buckets
+        try:
+            q = pd.qcut(hours[mask], q=min(max(buckets, 3), 10), duplicates='drop')
+        except Exception:
+            # fallback to equal-width bins
+            q = pd.cut(hours[mask], bins=min(max(buckets, 3), 10))
+        gb = pd.DataFrame({'bin': q, 'score': score[mask]}).groupby('bin')
+        avg = gb['score'].mean()
+        cnt = gb['score'].count()
+        labels = [str(i) for i in avg.index.astype(str)]
+        avg_vals = [float(v) if pd.notna(v) else 0.0 for v in avg.values]
+        cnt_vals = [int(v) for v in cnt.values]
+        return jsonify({'status': 'success', 'labels': labels, 'avg': avg_vals, 'count': cnt_vals, 'hours': h_col, 'score': s_col}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@analysis_bp.route('/ug/calculus-by-factors-bucket', methods=['GET'])
+def ug_calculus_by_factors_bucket():
+    """Multi-series: average calculus_avg_score (new) across quantile buckets of multiple factors.
+    Params:
+      factors: comma-separated columns (default study_hours,attendance_count,homework_score,practice_count)
+      buckets: number of quantile buckets (default 5)
+      target: optional score column (default calculus_avg_score); will fallback intelligently.
+          student_id: optional; when provided, restrict analysis to the cohort matching the student's grade (falls back gracefully).
+        Returns: { labels: ['Q1','Q2',...], series: [{name, data: [avg per bucket]}] }
+    """
+    try:
+        # 支持从前端指定表，默认 university_grades
+        table_name = request.args.get('table', 'university_grades')
+        ug = get_table_data(table_name)
+        if ug is None or ug.empty:
+            return jsonify({'status': 'success', 'labels': [], 'series': []}), 200
+
+        # 选择目标列：优先平均分 -> 参数指定 -> 兼容旧列
+        preferred_targets = ['calculus_avg_score', 'avg_calculus', 'calculus_average', 'calculus_score', 'total_score']
+        target = request.args.get('target')
+        if not target or target not in ug.columns:
+            target = next((c for c in preferred_targets if c in ug.columns), None)
+            # 若仍找不到，则自动猜测一个分数字段（包含 score/grade 的数值列）
+            if not target:
+                try:
+                    cand = []
+                    for c in ug.columns:
+                        low = str(c).lower()
+                        if any(k in low for k in ['score','grade','total','final','gpa']):
+                            s = pd.to_numeric(ug[c], errors='coerce')
+                            if s.notna().sum() > 0:
+                                cand.append(c)
+                    if cand:
+                        target = cand[0]
+                except Exception:
+                    target = None
+        if not target:
+            return jsonify({'status': 'success', 'labels': [], 'series': []}), 200
+        ug[target] = pd.to_numeric(ug.get(target), errors='coerce')
+        # 若传入 student_id，则尽量限定到该生所在年级/班级的同侪数据，使结果随学生切换而变化
+        sid = request.args.get('student_id')
+        if sid:
+            try:
+                st = get_table_data('students')
+                if st is not None and not st.empty and 'student_id' in st.columns:
+                    sdf = st[st['student_id'].astype(str) == str(sid)]
+                    if not sdf.empty:
+                        stu_grade = str(sdf.iloc[0].get('grade')) if 'grade' in sdf.columns else None
+                        stu_class = str(sdf.iloc[0].get('class')) if 'class' in sdf.columns else None
+                        cols_to_merge = [c for c in ['student_id', 'grade', 'class'] if c in st.columns]
+                        if cols_to_merge:
+                            ugm = ug.merge(st[cols_to_merge], on='student_id', how='left')
+                            if stu_grade and 'grade' in ugm.columns and ugm['grade'].notna().any():
+                                ug = ugm[ugm['grade'].astype(str) == stu_grade]
+                            elif stu_class and 'class' in ugm.columns and ugm['class'].notna().any():
+                                ug = ugm[ugm['class'].astype(str) == stu_class]
+                            else:
+                                ug = ugm
+            except Exception:
+                pass
+        default_factors = ['study_hours', 'attendance_count', 'homework_score', 'practice_count']
+        raw = request.args.get('factors')
+        factors = [c.strip() for c in raw.split(',')] if raw else default_factors
+        # 如果默认因子在该表中都不存在，则自动选择数值列（排除目标列与 *_id）作为因子，最多4个
+        if not raw:
+            missing_all = all((f not in ug.columns) for f in default_factors)
+            if missing_all:
+                try:
+                    num_cols = get_numeric_columns(ug, table_name)
+                    def is_factor_col(c: str):
+                        cl = str(c).lower()
+                        if c == target: return False
+                        if cl.endswith('_id') or cl in ('id','student_id'): return False
+                        return True
+                    auto = [c for c in num_cols if is_factor_col(c)]
+                    factors = auto[:4] if auto else []
+                except Exception:
+                    factors = []
+        buckets = int(request.args.get('buckets', 5))
+        buckets = min(max(buckets, 3), 10)
+
+        # 使用更直观的百分比分位标签，替代 Q1/Q2…：如 0%-20%、20%-40% …
+        labels = [f"{int((i-1)*100/buckets)}%-{int(i*100/buckets)}%" for i in range(1, buckets+1)]
+        series = []
+
+        for col in factors:
+            if col not in ug.columns:
+                continue
+            x = pd.to_numeric(ug[col], errors='coerce')
+            y = ug[target]
+            mask = x.notna() & y.notna()
+            if mask.sum() == 0:
+                series.append({'name': col, 'data': [0]*buckets})
+                continue
+            try:
+                q = pd.qcut(x[mask], q=buckets, labels=labels, duplicates='drop')
+                # 若去重导致分箱减少，补齐到 buckets 长度
+                grp = pd.DataFrame({'bin': q, 'y': y[mask]}).groupby('bin')['y'].mean()
+                data_map = {str(k): float(v) if pd.notna(v) else 0.0 for k, v in grp.items()}
+                data = [data_map.get(l, 0.0) for l in labels]
+            except Exception:
+                # fallback: equal width bins
+                try:
+                    q = pd.cut(x[mask], bins=buckets, labels=labels)
+                    grp = pd.DataFrame({'bin': q, 'y': y[mask]}).groupby('bin')['y'].mean()
+                    data_map = {str(k): float(v) if pd.notna(v) else 0.0 for k, v in grp.items()}
+                    data = [data_map.get(l, 0.0) for l in labels]
+                except Exception:
+                    data = [0.0]*buckets
+            series.append({'name': col, 'data': data})
+
+        # 友好显示名
+        name_map = {
+            'study_hours': '学习时长',
+            'attendance_count': '出勤次数',
+            'homework_score': '作业分数',
+            'practice_count': '刷题数'
+        }
+        for s in series:
+            s['name'] = name_map.get(s['name'], s['name'])
+
+        return jsonify({'status': 'success', 'labels': labels, 'series': series, 'target': target, 'table': table_name, 'factors': factors}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@analysis_bp.route('/ug/avg-score-by-student-grade', methods=['GET'])
+def ug_avg_score_by_student_grade():
+    """Bar: average calculus_avg_score grouped by students.grade (join by student_id).
+    Falls back to CSV if DB not available.
+    Params: score_col=calculus_avg_score (compatible with total_score as fallback)
+    """
+    try:
+        score_col = request.args.get('score_col', 'calculus_avg_score')
+        ug = get_table_data('university_grades')
+        st = get_table_data('students')
+        if ug is None or ug.empty or st is None or st.empty:
+            return jsonify({'status': 'success', 'labels': [], 'avg': []}), 200
+        # ensure numeric
+        ug[score_col] = pd.to_numeric(ug.get(score_col), errors='coerce')
+        df = pd.merge(ug, st[['student_id', 'grade']], on='student_id', how='inner')
+        df = df.dropna(subset=[score_col, 'grade'])
+        if df.empty:
+            return jsonify({'status': 'success', 'labels': [], 'avg': []}), 200
+        grp = df.groupby('grade')[score_col].mean().sort_index()
+        labels = [str(k) for k in grp.index.tolist()]
+        avg_vals = [float(v) if pd.notna(v) else 0.0 for v in grp.values.tolist()]
+        return jsonify({'status': 'success', 'labels': labels, 'avg': avg_vals}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@analysis_bp.route('/students/category-distribution', methods=['GET'])
+def students_category_distribution():
+    """Return counts for key categorical columns in students: gender, grade, class.
+    """
+    try:
+        st = get_table_data('students')
+        if st is None or st.empty:
+            return jsonify({'status': 'success', 'data': {}, 'total': 0}), 200
+        data = {}
+        total = int(len(st))
+        for col in ['gender', 'grade', 'class']:
+            if col in st.columns:
+                vc = st[col].astype(str).replace({'nan': None}).dropna().value_counts()
+                data[col] = [{'name': str(k), 'value': int(v)} for k, v in vc.items()]
+        return jsonify({'status': 'success', 'data': data, 'total': total}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@analysis_bp.route('/student-detail', methods=['GET'])
+def get_student_detail():
+    """Return combined student profile (from students) and grades (from university_grades) with simple percentiles.
+    Params: student_id (required)
+    """
+    try:
+        sid = request.args.get('student_id')
+        if not sid:
+            return jsonify({'status': 'error', 'message': '缺少参数: student_id'}), 400
+
+        # Load tables
+        st = get_table_data('students')
+        ug = get_table_data('university_grades')
+
+        profile = None
+        grades = None
+        percentiles = {}
+        factors = None
+
+        if st is not None and not st.empty and 'student_id' in st.columns:
+            sdf = st[st['student_id'].astype(str) == str(sid)]
+            if not sdf.empty:
+                row = sdf.iloc[0]
+                profile = {
+                    'student_id': int(row['student_id']) if pd.notna(row.get('student_id')) else None,
+                    'student_no': str(row.get('student_no', '')),
+                    'name': str(row.get('name', '')),
+                    'gender': str(row.get('gender', '')),
+                    'grade': str(row.get('grade', '')),
+                    'class': str(row.get('class', '')),
+                    'birth_date': str(row.get('birth_date')) if pd.notna(row.get('birth_date')) else None,
+                    'contact_phone': str(row.get('contact_phone', '')),
+                    'email': str(row.get('email', '')),
+                }
+
+        if ug is not None and not ug.empty and 'student_id' in ug.columns:
+            ugf = ug[ug['student_id'].astype(str) == str(sid)]
+            if not ugf.empty:
+                ur = ugf.iloc[0]
+                # basic grades record
+                def to_float(v):
+                    try:
+                        f = pd.to_numeric(v, errors='coerce')
+                        return float(f) if pd.notna(f) else None
+                    except Exception:
+                        return None
+
+                def to_int(v):
+                    try:
+                        f = pd.to_numeric(v, errors='coerce')
+                        return int(f) if pd.notna(f) else None
+                    except Exception:
+                        return None
+
+                grades = {
+                    # 新列（若不可用则在规范化时会构造）
+                    'first_calculus_score': to_float(ur.get('first_calculus_score')),
+                    'second_calculus_score': to_float(ur.get('second_calculus_score')),
+                    'third_calculus_score': to_float(ur.get('third_calculus_score')),
+                    'calculus_avg_score': to_float(ur.get('calculus_avg_score')),
+                    # 兼容旧列（保持一段时间）
+                    'calculus_score': to_float(ur.get('calculus_score')),
+                    'total_score': to_float(ur.get('total_score')),
+                    # 学习相关因子
+                    'study_hours': to_float(ur.get('study_hours')),
+                    'attendance_count': to_int(ur.get('attendance_count')),
+                    'homework_score': to_float(ur.get('homework_score')),
+                    'practice_count': to_int(ur.get('practice_count')),
+                }
+
+                # percentiles against whole table
+                for col in ['calculus_avg_score', 'first_calculus_score', 'second_calculus_score', 'third_calculus_score', 'calculus_score', 'total_score']:
+                    if col in ug.columns:
+                        col_ser = pd.to_numeric(ug[col], errors='coerce').dropna()
+                        val = pd.to_numeric(ur.get(col), errors='coerce')
+                        if pd.notna(val) and len(col_ser) > 0:
+                            # simple percentile: proportion less than or equal
+                            p = float((col_ser <= float(val)).mean() * 100.0)
+                            percentiles[col] = round(p, 2)
+
+                # assemble factors for a small chart in frontend
+                factors = [
+                    {'name': '学习时长', 'value': grades['study_hours'] if grades['study_hours'] is not None else 0},
+                    {'name': '出勤次数', 'value': grades['attendance_count'] if grades['attendance_count'] is not None else 0},
+                    {'name': '作业分数', 'value': grades['homework_score'] if grades['homework_score'] is not None else 0},
+                    {'name': '刷题数', 'value': grades['practice_count'] if grades['practice_count'] is not None else 0},
+                ]
+
+        return jsonify({
+            'status': 'success',
+            'student_id': sid,
+            'profile': profile,
+            'grades': grades,
+            'percentiles': percentiles,
+            'factors': factors
+        }), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# -----------------------------
+# Helpers: table loading and utils (used by multiple endpoints and training)
+# -----------------------------
+def _normalize_university_grades_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize university_grades columns to new schema with backward compatibility.
+
+    Ensures the following columns exist when possible:
+    - first_calculus_score, second_calculus_score, third_calculus_score, calculus_avg_score
+    Fallback rules:
+    - If first_calculus_score missing but calculus_score exists, copy it.
+    - If calculus_avg_score missing, compute mean of available first/second/third (ignore NaN);
+      if still missing, fallback to total_score or calculus_score if present.
+    """
+    try:
+        cols = set(df.columns.astype(str))
+        # Create attempt columns if missing
+        if 'first_calculus_score' not in cols and 'calculus_score' in cols:
+            df['first_calculus_score'] = pd.to_numeric(df['calculus_score'], errors='coerce')
+        if 'second_calculus_score' not in cols:
+            df['second_calculus_score'] = pd.to_numeric(df.get('second_calculus_score'), errors='coerce') if 'second_calculus_score' in cols else np.nan
+        if 'third_calculus_score' not in cols:
+            df['third_calculus_score'] = pd.to_numeric(df.get('third_calculus_score'), errors='coerce') if 'third_calculus_score' in cols else np.nan
+
+        # Compute calculus_avg_score if not present
+        if 'calculus_avg_score' not in cols:
+            # Try average of attempts
+            parts = []
+            for c in ['first_calculus_score', 'second_calculus_score', 'third_calculus_score']:
+                if c in df.columns:
+                    parts.append(pd.to_numeric(df[c], errors='coerce'))
+            if parts:
+                avg = pd.concat(parts, axis=1).mean(axis=1, skipna=True)
+            else:
+                avg = pd.Series([np.nan] * len(df))
+            df['calculus_avg_score'] = avg
+            # Fallback to total_score or calculus_score if avg all NaN
+            if df['calculus_avg_score'].isna().all():
+                if 'total_score' in df.columns:
+                    df['calculus_avg_score'] = pd.to_numeric(df['total_score'], errors='coerce')
+                elif 'calculus_score' in df.columns:
+                    df['calculus_avg_score'] = pd.to_numeric(df['calculus_score'], errors='coerce')
+        return df
+    except Exception:
+        # Best effort only
+        return df
+
+
+def get_table_data(table_name: str):
+    """Load table as pandas DataFrame from DB, fallback to CSV in database_datasets.
+
+    Returns None when not found.
+    """
+    try:
+        # Try DB
+        rows = fetch_all(f"SELECT * FROM `{table_name}`")
+        if rows is not None and len(rows) > 0:
+            df = pd.DataFrame(rows)
+            if table_name == 'university_grades' and df is not None and not df.empty:
+                df = _normalize_university_grades_df(df)
+            return df
+        # If DB reachable but empty, still return empty DF with columns from INFORMATION_SCHEMA when possible
+        cols = []
+        try:
+            cols = get_columns(table_name) or []
+        except Exception:
+            cols = []
+        df = pd.DataFrame(columns=cols)
+        if table_name == 'university_grades' and df is not None and not df.empty:
+            df = _normalize_university_grades_df(df)
+        return df
+    except Exception:
+        # Fallback to CSV
+        csv_candidates = [
+            Path(__file__).parent.parent / 'database_datasets' / f'{table_name}.csv',
+            Path(__file__).parent.parent.parent / 'database_datasets' / f'{table_name}.csv'
+        ]
+        for p in csv_candidates:
+            try:
+                if p.exists():
+                    df = pd.read_csv(p, encoding='utf-8')
+                    if table_name == 'university_grades' and df is not None and not df.empty:
+                        df = _normalize_university_grades_df(df)
+                    return df
+            except Exception:
+                continue
+    return None
+
+
+def get_primary_key_column(table_name: str):
+    """Best-effort guess of a table's primary key column name."""
+    # Common patterns
+    candidates = ['id', f'{table_name}_id', 'student_id', 'score_id', 'grade_id', 'performance_id']
+    try:
+        cols = get_columns(table_name) or []
+        for c in candidates:
+            if c in cols:
+                return c
+        # Fallback: any column that endswith _id
+        for c in cols:
+            if str(c).lower().endswith('_id'):
+                return c
+    except Exception:
+        pass
+    return None
+
+
+def get_numeric_columns(df: pd.DataFrame, table_name: str = ''):
+    """Return columns that can be treated as numeric (at least one numeric value)."""
+    num_cols = []
+    for c in df.columns:
+        try:
+            ser = pd.to_numeric(df[c], errors='coerce')
+            if ser.notna().sum() > 0:
+                num_cols.append(c)
+        except Exception:
+            continue
+    return num_cols
+
+
+def get_friendly_column_name(col: str):
+    name = feature_name_map.get(col)
+    if name:
+        return name
+    # Heuristics: map typical english to chinese
+    low = str(col).lower()
+    if 'score' in low:
+        return '分数'
+    if 'rank' in low:
+        return '排名'
+    if 'hours' in low:
+        return '学习时长'
+    if 'attendance' in low:
+        return '出勤次数'
+    if 'practice' in low:
+        return '刷题数'
+    return str(col)
+
 # 预定义表结构映射，用于优化特定表的处理
 table_structures = {
     'class_performance': {
@@ -153,7 +655,17 @@ feature_name_map = {
     'final_score': '期末成绩',
     'usual_score': '平时成绩',
     'total_score': '总成绩',
-    'grade_level': '等级'
+    'grade_level': '等级',
+    # university_grades表（新方案）
+    'calculus_score': '高数成绩',
+    'first_calculus_score': '高数第一次成绩',
+    'second_calculus_score': '高数第二次成绩',
+    'third_calculus_score': '高数第三次成绩',
+    'calculus_avg_score': '高数平均成绩',
+    'study_hours': '学习时长',
+    'attendance_count': '出勤次数',
+    'homework_score': '作业分数',
+    'practice_count': '刷题数'
 }
 
 @analysis_bp.route('/student-feedback', methods=['GET'])
@@ -410,6 +922,69 @@ def list_tables():
             'status': 'error',
             'message': str(e)
         }), 500
+
+@analysis_bp.route('/columns', methods=['GET'])
+def list_columns():
+    """获取指定表的列信息与推荐目标列。
+    返回：
+    - columns: 全部列名（按原始顺序）
+    - numeric_columns: 可转换为数值的列
+    - recommended_targets: 推荐作为目标列的列（中文关键词优先、再英文关键词、最后不返回时由前端显示“自动识别”）
+    """
+    try:
+        table_name = request.args.get('table')
+        if not table_name:
+            return jsonify({'status': 'error', 'message': '缺少参数: table'}), 400
+
+        df = get_table_data(table_name)
+        columns = []
+        numeric_columns = []
+        recommended = []
+
+        if df is not None and not df.empty:
+            # 统一列名为字符串
+            df.columns = [str(c) for c in df.columns]
+            columns = list(df.columns)
+            # 识别数值列（存在至少一个可转换为数值的非空值）
+            for c in df.columns:
+                try:
+                    ser = pd.to_numeric(df[c], errors='coerce')
+                    if ser.notna().sum() > 0:
+                        numeric_columns.append(c)
+                except Exception:
+                    continue
+
+            # 目标列推荐（中文优先、再英文）
+            zh_keys = ('总成绩','总分','分数','成绩','期末','期中','平时','总评')
+            en_keys = ('gpa','grade','score','final','total')
+            # 中文关键词优先
+            for c in columns:
+                if any(k in str(c) for k in zh_keys):
+                    recommended.append(c)
+            # 英文关键词其次
+            for c in columns:
+                low = str(c).lower()
+                if any(k in low for k in en_keys) and c not in recommended:
+                    recommended.append(c)
+            # 若仍为空且有数值列，不强行指定，交由前端显示“自动识别”
+        else:
+            # 回退：数据库列（无类型信息）
+            try:
+                from database import get_columns as db_get_columns
+                columns = db_get_columns(table_name) or []
+            except Exception:
+                columns = []
+
+        return jsonify({
+            'status': 'success',
+            'table': table_name,
+            'columns': columns,
+            'numeric_columns': numeric_columns,
+            'recommended_targets': recommended
+        }), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @analysis_bp.route('/student-trends', methods=['GET'])
 def get_student_trends():
@@ -1565,7 +2140,6 @@ def get_correlation():
 
 @analysis_bp.route('/score-distribution', methods=['GET'])
 def get_score_distribution():
-    """
     try:
         table_name = request.args.get('table', 'historical_grades')
         student_id = request.args.get('student_id')
@@ -1622,7 +2196,6 @@ def get_score_distribution():
 
 @analysis_bp.route('/grade-distribution', methods=['GET'])
 def get_grade_distribution():
-    """
     try:
         table_name = request.args.get('table', 'exam_scores')
         score_level_column = request.args.get('column')
@@ -1731,6 +2304,49 @@ def get_grade_distribution():
             'status': 'error',
             'message': str(e)
         }), 500
+
+
+@analysis_bp.route('/score-band-distribution', methods=['GET'])
+def get_score_band_distribution():
+    """Return counts by score bands (40-60, 60-80, 80-100) for a numeric score column.
+    Params: table, column (optional). If column missing, auto-select 'calculus_avg_score' (new) -> 'total_score' -> 'calculus_score' -> any '*score*' column.
+    """
+    try:
+        table_name = request.args.get('table', 'university_grades')
+        column = request.args.get('column')
+        df = get_table_data(table_name)
+        if df is None or df.empty:
+            return jsonify({'status': 'success', 'data': [], 'total': 0, 'table': table_name}), 200
+        # Auto-select column
+        if not column or column not in df.columns:
+            if 'calculus_avg_score' in df.columns:
+                column = 'calculus_avg_score'
+            elif 'total_score' in df.columns:
+                column = 'total_score'
+            elif 'calculus_score' in df.columns:
+                column = 'calculus_score'
+            else:
+                # first score-like numeric col
+                score_cols = [c for c in df.columns if 'score' in str(c).lower()]
+                column = score_cols[0] if score_cols else None
+        if not column or column not in df.columns:
+            return jsonify({'status': 'success', 'data': [], 'total': 0, 'table': table_name}), 200
+        ser = pd.to_numeric(df[column], errors='coerce').dropna()
+        # Define bands
+        bands = [
+            ('40-60', (40, 60)),
+            ('60-80', (60, 80)),
+            ('80-100', (80, 100.0000001))  # include 100
+        ]
+        data = []
+        total = int(len(ser))
+        for name, (lo, hi) in bands:
+            cnt = int(((ser >= lo) & (ser < hi)).sum())
+            data.append({'name': name, 'value': cnt})
+        return jsonify({'status': 'success', 'data': data, 'total': total, 'table': table_name, 'column': column}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @analysis_bp.route('/radar-data', methods=['GET'])
@@ -2011,6 +2627,88 @@ def create_record(table_name):
         if not data:
             return jsonify({'status': 'error', 'message': '请提供数据'}), 400
         
+        # 仅允许插入表中存在的列，过滤掉未知字段
+        try:
+            table_columns = set(get_columns(table_name) or [])
+        except Exception:
+            table_columns = set()
+        if table_columns:
+            data = {k: v for k, v in data.items() if k in table_columns}
+
+        # 基础校验：需要主键/必填字段
+        pk = get_primary_key_column(table_name) or 'id'
+
+        # 在校验前，尝试为 UG 从 student_no/name 解析出 student_id
+        if table_name == 'university_grades':
+            sid = data.get('student_id')
+            if not sid:
+                try:
+                    st = get_table_data('students')
+                except Exception:
+                    st = None
+                # 优先按学号解析
+                if st is not None and not st.empty:
+                    if data.get('student_no'):
+                        srow = st[st['student_no'].astype(str) == str(data['student_no'])]
+                        if len(srow) == 1:
+                            data['student_id'] = int(srow.iloc[0]['student_id'])
+                        elif len(srow) > 1:
+                            return jsonify({'status': 'error', 'message': '提供的学号匹配到多条学生记录，请检查数据'}), 400
+                        else:
+                            return jsonify({'status': 'error', 'message': '未找到该学号对应的学生，请先在学生表中创建或检查学号'}), 400
+                    elif data.get('name'):
+                        # 按姓名精确匹配（如有多名同名，要求提供学号）
+                        srow = st[st['name'].astype(str) == str(data['name'])]
+                        if len(srow) == 1:
+                            data['student_id'] = int(srow.iloc[0]['student_id'])
+                        elif len(srow) > 1:
+                            return jsonify({'status': 'error', 'message': '存在同名学生，请提供学号 student_no 以唯一定位'}), 400
+                        else:
+                            return jsonify({'status': 'error', 'message': '根据姓名未找到学生，请提供学号或先创建学生'}), 400
+
+            # 若仍没有 student_id，后续必填校验会提示
+
+        # ug 等表的主键需要显式提供
+        required_by_table = {
+            'university_grades': [pk],
+            'students': [pk],
+            'historical_grades': [],
+            'exam_scores': [],
+            'class_performance': []
+        }
+        required = required_by_table.get(table_name, [])
+        missing = [r for r in required if (r not in data or data.get(r) in (None, '', []))]
+        if missing:
+            return jsonify({'status': 'error', 'message': f"缺少必填字段: {', '.join(missing)}"}), 400
+
+        # 对 UG 再验证 student_id 是否存在于学生表
+        if table_name == 'university_grades' and 'student_id' in data:
+            try:
+                st = get_table_data('students')
+                if st is None or st.empty or 'student_id' not in st.columns or not (st['student_id'].astype(str) == str(data['student_id'])).any():
+                    return jsonify({'status': 'error', 'message': 'student_id 不存在于学生表，请确认后再提交'}), 400
+            except Exception:
+                # 无法验证时放行（可能使用 CSV 回退场景），由数据库约束兜底
+                pass
+
+        # 针对 university_grades，若提供了单次成绩，自动补全平均分
+        if table_name == 'university_grades':
+            def to_num(x):
+                try:
+                    import numpy as _np
+                    v = _np.nan if x is None or x == '' else x
+                    return float(v)
+                except Exception:
+                    try:
+                        return float(str(x))
+                    except Exception:
+                        return None
+            if 'calculus_avg_score' not in data:
+                parts = [to_num(data.get('first_calculus_score')), to_num(data.get('second_calculus_score')), to_num(data.get('third_calculus_score'))]
+                parts = [p for p in parts if p is not None]
+                if parts:
+                    data['calculus_avg_score'] = round(sum(parts) / len(parts), 2)
+
         # 构建INSERT SQL
         columns = list(data.keys())
         placeholders = ', '.join(['%s'] * len(columns))
@@ -2109,6 +2807,7 @@ def get_primary_key_column(table_name):
     """获取表的主键列名"""
     primary_keys = {
         'students': 'student_id',
+        'university_grades': 'student_id',
         'exam_scores': 'score_id',
         'class_performance': 'performance_id',
         'historical_grades': 'grade_id'

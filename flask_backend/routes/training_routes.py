@@ -14,13 +14,16 @@
 from flask import Blueprint, request, jsonify
 from database import fetch_all, execute_query, fetch_one
 from services.prediction import PredictionService
+from services.preprocessing import preprocess_df
+from services.model_selection import ModelSelector
 import pandas as pd
+import numpy as np
 import traceback
 import sys
 import pickle
 import os
 from datetime import datetime
-from routes.analysis_routes import get_table_data
+from routes.analysis_routes import get_table_data, get_primary_key_column
 
 training_bp = Blueprint('training_bp', __name__)
 
@@ -145,6 +148,322 @@ def train_model():
         }), 500
 
 
+@training_bp.route('/predict-table', methods=['POST'])
+def predict_table():
+    """
+    基于指定表进行训练与预测：
+    - 先对表数据进行预处理
+    - 自动或按 targetColumn 选择目标列
+    - 评估模型（留出集）并返回指标
+    - 在全量样本上拟合并给出预测值（含对目标缺失样本的重点返回）
+
+    入参 JSON：
+    - table: 表名（必填）
+    - targetColumn: 目标列（可选，默认自动猜测包含 score/grade/final 的列）
+    - testSize: 测试集比例（默认0.2）
+    - previewLimit: 预测预览条数（默认50）
+    """
+    try:
+        data = request.get_json(force=True)
+        table_name = data.get('table')
+        target_column = data.get('targetColumn')
+        test_size = float(data.get('testSize', 0.2))
+        preview_limit = int(data.get('previewLimit', 50))
+
+        if not table_name:
+            return jsonify({'status': 'error', 'message': '缺少参数: table'}), 400
+
+        # 加载表数据
+        df_raw = get_table_data(table_name)
+        if df_raw is None or df_raw.empty:
+            return jsonify({'status': 'error', 'message': f'表 {table_name} 无可用数据'}), 400
+
+        # 记录目标列缺失的样本，用于后续重点返回
+        missing_mask = None
+        if target_column and target_column in df_raw.columns:
+            missing_mask = df_raw[target_column].isna()
+
+        # 预处理（去重/缺失填充/异常值/编码）
+        df_proc, encoders = preprocess_df(df_raw)
+
+        # 自动识别目标列（支持中文）
+        if not target_column:
+            en_keys = ('gpa','grade','score','final','total')
+            zh_keys = ('总成绩','总分','分数','成绩','期末','期中','平时','总评')
+            cand = []
+            for c in df_proc.columns:
+                if any(k in str(c) for k in zh_keys):
+                    cand.append(c)
+            for c in df_proc.columns:
+                cl = str(c).lower()
+                if any(k in cl for k in en_keys) and c not in cand:
+                    cand.append(c)
+            if cand:
+                target_column = cand[0]
+            else:
+                nums = df_proc.select_dtypes(include=['int64','float64']).columns.tolist()
+                if not nums:
+                    return jsonify({'status': 'error', 'message': '无法识别目标列，请提供 targetColumn 或在表中包含成绩列（如“总成绩/总分/分数”等）'}), 400
+                target_column = nums[-1]
+
+        if target_column not in df_proc.columns:
+            return jsonify({'status': 'error', 'message': f'目标列 {target_column} 不存在于表 {table_name}'}), 400
+
+        # 组装训练数据
+        X_all = df_proc.drop(columns=[target_column])
+        y_all = df_proc[target_column]
+        feature_names = X_all.columns.tolist()
+
+        # 划分评估集
+        from sklearn.model_selection import train_test_split
+        X_train, X_test, y_train, y_test = train_test_split(X_all.values, y_all.values, test_size=max(min(test_size, 0.9), 0.05), random_state=42)
+
+        # 选择模型并评估
+        selector = ModelSelector()
+        best_model, model_results, best_params = selector.select_best_model(X_train, y_train)
+        y_pred = best_model.predict(X_test)
+
+        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+        import numpy as np
+        metrics = {
+            'r2': float(r2_score(y_test, y_pred)),
+            'mae': float(mean_absolute_error(y_test, y_pred)),
+            'rmse': float(np.sqrt(mean_squared_error(y_test, y_pred)))
+        }
+
+        # 在全量数据上重新拟合获取全量预测（便于给前端展示）
+        best_model.fit(X_all.values, y_all.values)
+        y_pred_all = best_model.predict(X_all.values)
+
+        # 主键列用于拼装预览（若无则不返回ID）
+        pk = get_primary_key_column(table_name)
+        preview_rows = []
+        try:
+            for i in range(min(preview_limit, len(df_raw))):
+                row = {
+                    'predicted': float(y_pred_all[i]),
+                    'actual': float(y_all.iloc[i]) if not pd.isna(y_all.iloc[i]) else None
+                }
+                if pk in df_raw.columns:
+                    row[pk] = df_raw.iloc[i][pk]
+                preview_rows.append(row)
+        except Exception:
+            pass
+
+        # 目标缺失样本的预测（如果存在）
+        predicted_missing = []
+        try:
+            if missing_mask is None and target_column in df_raw.columns:
+                missing_mask = df_raw[target_column].isna()
+            if missing_mask is not None and missing_mask.any():
+                idxs = np.where(missing_mask.values)[0].tolist()
+                for i in idxs[:preview_limit]:
+                    row = {'predicted': float(y_pred_all[i])}
+                    if pk in df_raw.columns:
+                        row[pk] = df_raw.iloc[i][pk]
+                    predicted_missing.append(row)
+        except Exception:
+            pass
+
+        # 特征重要性
+        fi = selector.get_feature_importance(best_model, feature_names)
+        fi_records = None
+        if fi is not None:
+            # 确保可序列化
+            fi_records = []
+            try:
+                for r in fi.to_dict('records'):
+                    fi_records.append({
+                        'feature': str(r.get('feature')),
+                        'importance': float(r.get('importance')) if r.get('importance') is not None else 0.0
+                    })
+            except Exception:
+                pass
+
+        # 统一将 numpy 类型转换为原生 Python，避免 jsonify 报错
+        def to_py(v):
+            try:
+                if isinstance(v, (np.integer,)):
+                    return int(v)
+                if isinstance(v, (np.floating,)):
+                    return float(v)
+                if isinstance(v, (np.ndarray,)):
+                    return v.tolist()
+                return v
+            except Exception:
+                return v
+
+        # 规范化预览中的主键与数值类型
+        if isinstance(preview_rows, list):
+            for row in preview_rows:
+                for k in list(row.keys()):
+                    row[k] = to_py(row[k])
+        if isinstance(predicted_missing, list):
+            for row in predicted_missing:
+                for k in list(row.keys()):
+                    row[k] = to_py(row[k])
+
+        return jsonify({
+            'status': 'success',
+            'message': '训练与预测完成',
+            'data': {
+                'table': table_name,
+                'target_column': target_column,
+                'metrics': {k: to_py(v) for k, v in metrics.items()},
+                'model_results': {k: {kk: to_py(vv) for kk, vv in vv.items()} for k, vv in model_results.items()},
+                'best_params': {k: to_py(v) for k, v in best_params.items()} if isinstance(best_params, dict) else best_params,
+                'feature_importance': fi_records,
+                'preview': preview_rows,
+                'predicted_missing': predicted_missing
+            }
+        }), 200
+
+    except Exception as e:
+        print(f"[ERR] predict-table 失败: {str(e)}")
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@training_bp.route('/predict-student', methods=['GET'])
+def predict_student():
+    """
+    基于指定表为某个学生进行预测（使用该表训练一个模型）。
+    入参（query）：
+    - table: 表名（必填）
+    - student_id: 学生ID（必填）
+    - targetColumn: 目标列（可选）
+    - course_id: 课程ID（可选，用于选择该生的某门课记录）
+    返回：predicted（预测值）、target_column、metrics、feature_importance（可选）
+    """
+    try:
+        table_name = request.args.get('table')
+        student_id = request.args.get('student_id')
+        target_column = request.args.get('targetColumn')
+        course_id = request.args.get('course_id')
+
+        if not table_name or not student_id:
+            return jsonify({'status': 'error', 'message': '缺少参数: table 或 student_id'}), 400
+
+        df_raw = get_table_data(table_name)
+        if df_raw is None or df_raw.empty:
+            return jsonify({'status': 'error', 'message': f'表 {table_name} 无可用数据'}), 400
+
+        # 筛选该学生数据
+        if 'student_id' not in df_raw.columns:
+            return jsonify({'status': 'error', 'message': f'表 {table_name} 缺少 student_id 列，无法为学生预测'}), 400
+        sdf = df_raw[df_raw['student_id'].astype(str) == str(student_id)].copy()
+        if course_id and 'course_id' in sdf.columns:
+            sdf = sdf[sdf['course_id'].astype(str) == str(course_id)]
+        if sdf.empty:
+            return jsonify({'status': 'error', 'message': '该学生在此表中无记录'}), 404
+
+        # 预处理全表并训练模型
+        df_proc, _ = preprocess_df(df_raw)
+        # 自动/指定目标列（支持中文）
+        if not target_column:
+            en_keys = ('gpa','grade','score','final','total')
+            zh_keys = ('总成绩','总分','分数','成绩','期末','期中','平时','总评')
+            cand = []
+            for c in df_proc.columns:
+                if any(k in str(c) for k in zh_keys):
+                    cand.append(c)
+            for c in df_proc.columns:
+                cl = str(c).lower()
+                if any(k in cl for k in en_keys) and c not in cand:
+                    cand.append(c)
+            if cand:
+                target_column = cand[0]
+            else:
+                nums = df_proc.select_dtypes(include=['int64','float64']).columns.tolist()
+                if not nums:
+                    return jsonify({'status': 'error', 'message': '无法识别目标列，请提供 targetColumn 或在表中包含成绩列（如“总成绩/总分/分数”等）'}), 400
+                target_column = nums[-1]
+        if target_column not in df_proc.columns:
+            return jsonify({'status': 'error', 'message': f'目标列 {target_column} 不存在'}), 400
+
+        X_all = df_proc.drop(columns=[target_column])
+        y_all = df_proc[target_column]
+        feature_names = X_all.columns.tolist()
+
+        from sklearn.model_selection import train_test_split
+        X_train, X_test, y_train, y_test = train_test_split(X_all.values, y_all.values, test_size=0.2, random_state=42)
+        selector = ModelSelector()
+        best_model, model_results, best_params = selector.select_best_model(X_train, y_train)
+        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+        import numpy as np
+        y_pred = best_model.predict(X_test)
+        metrics = {
+            'r2': float(r2_score(y_test, y_pred)),
+            'mae': float(mean_absolute_error(y_test, y_pred)),
+            'rmse': float(np.sqrt(mean_squared_error(y_test, y_pred)))
+        }
+
+        # 在全量数据上重新拟合
+        best_model.fit(X_all.values, y_all.values)
+
+        # 用该学生的“最新一条”记录做预测（优先按 grade_id 或 exam_date 排序）
+        row = sdf.copy()
+        sort_done = False
+        for key in ['grade_id', 'score_id']:
+            if key in row.columns:
+                row = row.sort_values(by=key)
+                sort_done = True
+                break
+        if not sort_done:
+            if 'exam_date' in row.columns:
+                row['exam_date_parsed'] = pd.to_datetime(row['exam_date'], errors='coerce')
+                row = row.sort_values(by='exam_date_parsed')
+                sort_done = True
+        row_latest = row.iloc[-1:]
+
+        # 将最新记录通过相同预处理对齐（简单做法：在全表预处理后对齐列名，取该行原始映射列）
+        # 这里采用再次整体预处理并从 df_proc 中定位行索引的方式（可能不存在一一对应，做列交集对齐）
+        # 构造与 X_all 同列的特征行
+        feature_cols = list(feature_names)
+        row_feat = row_latest.reindex(columns=feature_cols, fill_value=np.nan)
+        # 缺失填充（用列均值）
+        for c in feature_cols:
+            if row_feat[c].isna().any():
+                try:
+                    mean_val = pd.to_numeric(X_all[c], errors='coerce').mean()
+                    row_feat[c] = row_feat[c].fillna(mean_val)
+                except Exception:
+                    row_feat[c] = row_feat[c].fillna(0)
+
+        pred_val = float(best_model.predict(row_feat.values)[0])
+
+        fi = selector.get_feature_importance(best_model, feature_names)
+        fi_records = None
+        if fi is not None:
+            fi_records = []
+            try:
+                for r in fi.to_dict('records'):
+                    fi_records.append({
+                        'feature': str(r.get('feature')),
+                        'importance': float(r.get('importance')) if r.get('importance') is not None else 0.0
+                    })
+            except Exception:
+                pass
+
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'table': table_name,
+                'student_id': student_id,
+                'course_id': course_id,
+                'target_column': target_column,
+                'predicted': float(pred_val),
+                'metrics': {k: float(v) for k, v in metrics.items()},
+                'feature_importance': fi_records
+            }
+        }), 200
+
+    except Exception as e:
+        print(f"[ERR] predict-student 失败: {str(e)}")
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @training_bp.route('/models', methods=['GET'])
 def get_models():
     """
@@ -182,63 +501,127 @@ def get_training_data_stats():
     获取训练数据统计信息
     """
     try:
-        # 统计可用的训练数据量
-        stats_query = """
-            SELECT 
-                COUNT(*) as total_records,
-                COUNT(DISTINCT student_id) as total_students,
-                COUNT(DISTINCT course_id) as total_courses,
-                AVG(total_score) as avg_score,
-                MIN(total_score) as min_score,
-                MAX(total_score) as max_score
-            FROM historical_grades
-            WHERE total_score IS NOT NULL
-        """
-        
-        stats = fetch_all(stats_query)
+        # 方案优先级：university_grades（新表，真实数据）> historical_grades（旧表）
 
-        # 学生总人数（来自学生表，新增学生应立即反映）
+        # 学生总人数（来自学生表，DB 优先，失败则 CSV）
         total_students_all = 0
         try:
             row = fetch_one("SELECT COUNT(*) AS total_students_all FROM students")
             if row and 'total_students_all' in row:
                 total_students_all = int(row['total_students_all'] or 0)
         except Exception:
-            # 如果 students 表不存在或查询失败，兜底为 0，避免接口报错
-            total_students_all = 0
-        
-        # 按学期统计
-        semester_stats_query = """
-            SELECT 
-                semester,
-                academic_year,
-                COUNT(*) as record_count,
-                AVG(total_score) as avg_score
-            FROM historical_grades
-            WHERE total_score IS NOT NULL
-            GROUP BY semester, academic_year
-            ORDER BY academic_year DESC, semester
-            LIMIT 10
-        """
-        
-        semester_stats = fetch_all(semester_stats_query)
-        
-        overall = stats[0] if stats else {}
-        # 增补 overall 字段：学生总人数（来自 students 表）
+            st = get_table_data('students')
+            if st is not None and not st.empty:
+                try:
+                    total_students_all = int(len(st))
+                except Exception:
+                    total_students_all = 0
+
+        # 优先用 university_grades 统计
+        ug = get_table_data('university_grades')
+        if ug is not None and not ug.empty:
+            try:
+                df = ug.copy()
+                # 已在 get_table_data 中规范化过 calculus_avg_score，稳妥起见再转数值
+                df['calculus_avg_score'] = pd.to_numeric(df.get('calculus_avg_score'), errors='coerce')
+                overall = {
+                    'total_records': int(len(df)),
+                    'total_students': int(df['student_id'].nunique()) if 'student_id' in df.columns else None,
+                    # UG 为单科数据，无课程列；置为 None（前端会显示 0）或可置为 1 表示单课程
+                    'total_courses': None,
+                    'avg_score': float(df['calculus_avg_score'].dropna().mean()) if df['calculus_avg_score'].notna().any() else None,
+                    'min_score': float(df['calculus_avg_score'].dropna().min()) if df['calculus_avg_score'].notna().any() else None,
+                    'max_score': float(df['calculus_avg_score'].dropna().max()) if df['calculus_avg_score'].notna().any() else None,
+                }
+                overall['total_students_all'] = total_students_all
+                # UG 无学期字段，返回空列表
+                return jsonify({'status': 'success', 'data': {'overall': overall, 'by_semester': []}}), 200
+            except Exception:
+                pass
+
+        # 回退到 historical_grades（旧表）
+        # 先尝试数据库统计
+        try:
+            stats_query = """
+                SELECT 
+                    COUNT(*) as total_records,
+                    COUNT(DISTINCT student_id) as total_students,
+                    COUNT(DISTINCT course_id) as total_courses,
+                    AVG(total_score) as avg_score,
+                    MIN(total_score) as min_score,
+                    MAX(total_score) as max_score
+                FROM historical_grades
+                WHERE total_score IS NOT NULL
+            """
+            stats = fetch_all(stats_query)
+        except Exception:
+            stats = None
+
+        # 按学期统计（DB 优先，失败则 CSV 回退）
+        try:
+            semester_stats_query = """
+                SELECT 
+                    semester,
+                    academic_year,
+                    COUNT(*) as record_count,
+                    AVG(total_score) as avg_score
+                FROM historical_grades
+                WHERE total_score IS NOT NULL
+                GROUP BY semester, academic_year
+                ORDER BY academic_year DESC, semester
+                LIMIT 10
+            """
+            semester_stats = fetch_all(semester_stats_query)
+        except Exception:
+            semester_stats = []
+            hg = get_table_data('historical_grades')
+            if hg is not None and not hg.empty:
+                try:
+                    df = hg.copy()
+                    df['total_score'] = pd.to_numeric(df.get('total_score'), errors='coerce')
+                    grp = df.dropna(subset=['total_score']).groupby(['academic_year','semester']).agg(
+                        record_count=('total_score','count'),
+                        avg_score=('total_score','mean')
+                    ).reset_index()
+                    grp = grp.sort_values(['academic_year','semester'], ascending=[False, True]).head(10)
+                    semester_stats = [
+                        {
+                            'academic_year': str(r['academic_year']),
+                            'semester': str(r['semester']),
+                            'record_count': int(r['record_count']),
+                            'avg_score': float(r['avg_score']) if pd.notna(r['avg_score']) else None
+                        }
+                        for _, r in grp.iterrows()
+                    ]
+                except Exception:
+                    semester_stats = []
+
+        # overall（DB 优先，失败则 CSV 回退）
+        if stats and len(stats) > 0 and isinstance(stats[0], dict):
+            overall = dict(stats[0])
+        else:
+            overall = {}
+            hg = get_table_data('historical_grades')
+            if hg is not None and not hg.empty:
+                try:
+                    df = hg.copy()
+                    df['total_score'] = pd.to_numeric(df.get('total_score'), errors='coerce')
+                    overall = {
+                        'total_records': int(df['total_score'].notna().sum()),
+                        'total_students': int(df['student_id'].nunique()) if 'student_id' in df.columns else None,
+                        'total_courses': int(df['course_id'].nunique()) if 'course_id' in df.columns else None,
+                        'avg_score': float(df['total_score'].dropna().mean()) if df['total_score'].notna().any() else None,
+                        'min_score': float(df['total_score'].dropna().min()) if df['total_score'].notna().any() else None,
+                        'max_score': float(df['total_score'].dropna().max()) if df['total_score'].notna().any() else None,
+                    }
+                except Exception:
+                    overall = {}
+
         if isinstance(overall, dict):
             overall['total_students_all'] = total_students_all
 
-        return jsonify({
-            'status': 'success',
-            'data': {
-                'overall': overall,
-                'by_semester': semester_stats
-            }
-        }), 200
-        
+        return jsonify({'status': 'success', 'data': {'overall': overall, 'by_semester': semester_stats}}), 200
+
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500

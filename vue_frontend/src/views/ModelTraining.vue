@@ -27,8 +27,8 @@
         </el-col>
         <el-col :span="6">
           <div class="stat-item">
-            <div class="stat-value">{{ dataStats.overall.total_courses || 0 }}</div>
-            <div class="stat-label">课程数</div>
+            <div class="stat-value">{{ (dataStats.overall.max_score || 0).toFixed(2) }}</div>
+            <div class="stat-label">最高分</div>
           </div>
         </el-col>
         <el-col :span="6">
@@ -49,11 +49,27 @@
       </template>
 
       <el-form :model="trainConfig" label-width="120px">
+        <el-form-item label="数据表">
+          <el-select v-model="trainConfig.table" placeholder="选择数据源" style="width: 260px">
+            <el-option
+              v-for="t in availableTables"
+              :key="t"
+              :label="getTableLabel(t)"
+              :value="t"
+            >
+              <span style="float:left">{{ getTableLabel(t) }}</span>
+            </el-option>
+          </el-select>
+        </el-form-item>
         <el-form-item label="目标列">
-          <el-select v-model="trainConfig.targetColumn" placeholder="选择预测目标">
-            <el-option label="总分 (total_score)" value="total_score" />
-            <el-option label="期末成绩 (final_score)" value="final_score" />
-            <el-option label="期中成绩 (midterm_score)" value="midterm_score" />
+          <el-select v-model="trainConfig.targetColumn" placeholder="自动识别" style="width: 300px" clearable>
+            <el-option :label="'自动识别'" :value="''" />
+            <el-option
+              v-for="col in targetColumnOptions"
+              :key="col"
+              :label="translateColumnName(col)"
+              :value="col"
+            />
           </el-select>
         </el-form-item>
 
@@ -62,17 +78,10 @@
           <span class="slider-label">{{ trainConfig.testSize }}%</span>
         </el-form-item>
 
-        <el-form-item label="数据源">
-          <el-radio-group v-model="trainConfig.dataSource">
-            <el-radio label="database">数据库</el-radio>
-            <el-radio label="upload" disabled>上传文件</el-radio>
-          </el-radio-group>
-        </el-form-item>
-
         <el-form-item>
           <el-button type="primary" @click="startTraining" :loading="training" size="large">
             <el-icon><VideoPlay /></el-icon>
-            开始训练
+            开始训练与评估
           </el-button>
         </el-form-item>
       </el-form>
@@ -163,16 +172,16 @@
 
       <h4>📊 可视化结果</h4>
       <el-row :gutter="20">
-        <el-col :span="12" v-if="trainResult.visualizations.prediction_scatter">
+        <el-col :span="12">
           <div class="viz-container">
             <h5>预测值对比实际值</h5>
-            <img :src="'data:image/png;base64,' + trainResult.visualizations.prediction_scatter" alt="预测散点图" />
+            <div class="chart-container small" ref="trainPredScatter"></div>
           </div>
         </el-col>
-        <el-col :span="12" v-if="trainResult.visualizations.feature_importance">
+        <el-col :span="12">
           <div class="viz-container">
             <h5>特征重要性分布</h5>
-            <img :src="'data:image/png;base64,' + trainResult.visualizations.feature_importance" alt="特征重要性" />
+            <div class="chart-container small" ref="trainFiBar"></div>
           </div>
         </el-col>
       </el-row>
@@ -180,15 +189,17 @@
       <el-divider />
 
       <div class="training-info">
-        <p><strong>训练样本数：</strong> {{ trainResult.training_samples }}</p>
+        <p><strong>训练样本数：</strong> {{ trainResult.training_samples || '-' }}</p>
         <p><strong>目标列：</strong> {{ trainResult.target_column }}</p>
-        <p><strong>模型文件：</strong> {{ trainResult.model_file }}</p>
+        <p v-if="trainResult.model_file"><strong>模型文件：</strong> {{ trainResult.model_file }}</p>
+        <p><strong>数据表：</strong> {{ getTableLabel(trainConfig.table) }}</p>
       </div>
     </el-card>
   </div>
 </template>
 
 <script>
+import * as echarts from 'echarts'
 import axios from 'axios'
 import { Refresh, VideoPlay, CircleCheck } from '@element-plus/icons-vue'
 
@@ -205,26 +216,92 @@ export default {
         overall: null,
         by_semester: []
       },
+  availableTables: [],
+      targetOptions: {
+        columns: [],
+        numeric_columns: [],
+        recommended_targets: []
+      },
       trainConfig: {
-        targetColumn: 'total_score',
-        testSize: 20,
-        dataSource: 'database'
+        table: '',
+        targetColumn: '',
+        testSize: 20
       },
       trainResult: {
         metrics: null,
         model_results: [],
         feature_importance: [],
-        visualizations: {},
+        preview: [],
         training_samples: 0,
         target_column: '',
         model_file: ''
+      },
+      charts: {
+        predScatter: null,
+        fiBar: null
       }
     }
   },
   mounted() {
     this.loadDataStats()
+    this.loadTables()
   },
   methods: {
+    async fetchTargetColumns() {
+      try {
+        if (!this.trainConfig.table) {
+          this.targetOptions = { columns: [], numeric_columns: [], recommended_targets: [] }
+          return
+        }
+        const res = await axios.get('/api/analysis/columns', { params: { table: this.trainConfig.table } })
+        if (res.data?.status === 'success') {
+          this.targetOptions = {
+            columns: res.data.columns || [],
+            numeric_columns: res.data.numeric_columns || [],
+            recommended_targets: res.data.recommended_targets || []
+          }
+          // 若当前选择的目标列不在候选中，则置空以使用自动识别
+          if (this.trainConfig.targetColumn && !this.targetOptions.columns.includes(this.trainConfig.targetColumn)) {
+            this.trainConfig.targetColumn = ''
+          }
+        }
+      } catch (e) {
+        console.warn('加载列信息失败:', e)
+      }
+    },
+    async loadTables() {
+      try {
+        const res = await axios.get('/api/analysis/tables')
+        if (res.data?.status === 'success') {
+          const all = res.data.tables || []
+          // 仅关注相关表，并优先 university_grades
+          this.availableTables = all.filter(t => ['university_grades','students'].includes(t))
+          if (!this.trainConfig.table) {
+            if (this.availableTables.includes('university_grades')) this.trainConfig.table = 'university_grades'
+            else if (this.availableTables.length) this.trainConfig.table = this.availableTables[0]
+          }
+          await this.fetchTargetColumns()
+        }
+      } catch (err) {
+        console.error('加载表列表失败:', err)
+      }
+    },
+    async loadTables() {
+      try {
+        const res = await axios.get('/api/analysis/tables')
+        if (res.data?.status === 'success') {
+          const all = res.data.tables || []
+          this.availableTables = all.filter(t => ['university_grades','students'].includes(t))
+          if (!this.trainConfig.table) {
+            this.trainConfig.table = this.availableTables.includes('university_grades')
+              ? 'university_grades'
+              : (this.availableTables[0] || '')
+          }
+        }
+      } catch (err) {
+        console.error('加载表列表失败:', err)
+      }
+    },
     formatNumber(val) {
       const num = Number(val)
       return Number.isFinite(num) ? num.toFixed(2) : '-'
@@ -248,13 +325,13 @@ export default {
       try {
         this.training = true
         this.progress = 0
-        this.progressText = '正在从数据库加载训练数据...'
+        this.progressText = '正在加载数据并预处理...'
         // 重置训练结果
         this.trainResult = {
           metrics: null,
           model_results: [],
           feature_importance: [],
-          visualizations: {},
+          preview: [],
           training_samples: 0,
           target_column: '',
           model_file: ''
@@ -265,7 +342,7 @@ export default {
           if (this.progress < 90) {
             this.progress += 10
             if (this.progress === 30) {
-              this.progressText = '数据预处理中...'
+              this.progressText = '特征工程/编码中...'
             } else if (this.progress === 50) {
               this.progressText = '模型训练中...'
             } else if (this.progress === 70) {
@@ -276,18 +353,30 @@ export default {
           }
         }, 500)
 
-        const response = await axios.post('/api/training/train', {
-          targetColumn: this.trainConfig.targetColumn,
-          testSize: this.trainConfig.testSize / 100,
-          dataSource: this.trainConfig.dataSource
-        })
+        if (!this.trainConfig.table) {
+          clearInterval(progressInterval)
+          this.$message.error('请先选择数据表')
+          this.training = false
+          return
+        }
+
+        const payload = {
+          table: this.trainConfig.table,
+          testSize: this.trainConfig.testSize / 100
+        }
+        if (this.trainConfig.targetColumn) {
+          payload.targetColumn = this.trainConfig.targetColumn
+        }
+
+        const response = await axios.post('/api/training/predict-table', payload)
 
         clearInterval(progressInterval)
 
         if (response.data.status === 'success') {
           this.progress = 100
           this.progressText = '训练完成！'
-          this.trainResult = response.data.data
+          this.trainResult = response.data.data || {}
+          this.renderTrainingCharts()
           this.$message.success('模型训练完成！')
         } else {
           this.$message.error(response.data.message || '训练失败')
@@ -304,9 +393,94 @@ export default {
       if (r2 >= 0.8) return 'excellent'
       if (r2 >= 0.6) return 'good'
       return 'fair'
+    },
+
+  renderTrainingCharts() {
+      // 预测散点图（仅绘制有实际值的样本）
+      try {
+        const container1 = this.$refs.trainPredScatter
+        if (container1) {
+          if (!this.charts.predScatter) this.charts.predScatter = echarts.init(container1)
+          const pts = (this.trainResult.preview || [])
+            .filter(r => r && r.actual !== null && r.actual !== undefined)
+            .map(r => [Number(r.actual), Number(r.predicted)])
+          const option1 = {
+            tooltip: { trigger: 'item', formatter: p => `实际: ${p.value[0].toFixed(2)}<br/>预测: ${p.value[1].toFixed(2)}` },
+            xAxis: { name: '实际' },
+            yAxis: { name: '预测' },
+            series: [{ type: 'scatter', data: pts, symbolSize: 8, itemStyle: { color: '#409EFF' } }]
+          }
+          this.charts.predScatter.setOption(option1, true)
+        }
+      } catch (e) { console.warn('渲染预测散点图失败', e) }
+
+      // 特征重要性条形图
+      try {
+        const container2 = this.$refs.trainFiBar
+        if (container2) {
+          if (!this.charts.fiBar) this.charts.fiBar = echarts.init(container2)
+          const fi = this.trainResult.feature_importance || []
+          const labels = fi.map(x => x.feature)
+          const vals = fi.map(x => Number(x.importance))
+          const option2 = {
+            tooltip: { trigger: 'axis' },
+            xAxis: { type: 'value' },
+            yAxis: { type: 'category', data: labels, inverse: true },
+            series: [{ type: 'bar', data: vals, itemStyle: { color: '#67C23A' } }]
+          }
+          this.charts.fiBar.setOption(option2, true)
+        }
+      } catch (e) { console.warn('渲染特征重要性失败', e) }
+    },
+
+    getTableLabel(table) {
+      if (!table) return '自定义表'
+      if (/[^\x00-\x7F]/.test(String(table))) return table
+      return this.translateTableName(table)
+    },
+    translateTableName(name) {
+      const dict = {
+        'students': '学生', 'student': '学生',
+        'exam': '考试', 'exams': '考试',
+        'score': '成绩', 'scores': '成绩',
+        'class': '课堂', 'classes': '课堂',
+        'performance': '表现',
+        'historical': '历史', 'history': '历史',
+        'grade': '成绩', 'grades': '成绩',
+        'course': '课程', 'courses': '课程',
+        'teacher': '教师', 'teachers': '教师',
+        'type': '类型', 'types': '类型',
+        'record': '记录', 'records': '记录',
+        'upload': '上传', 'data': '数据', 'source': '来源', 'mapping': '映射',
+        'sync': '同步', 'state': '状态', 'status': '状态'
+      }
+      const parts = String(name).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+      const cn = parts.map(p => dict[p]).filter(Boolean)
+      if (cn.length) return cn.join('') + '表'
+      return '自定义表'
+    },
+    translateColumnName(col) {
+      const map = {
+        total_score: '总成绩', final_score: '期末成绩', midterm_score: '期中成绩', usual_score: '平时成绩',
+        score: '分数', ranking: '排名',
+        calculus_score: '高等数学成绩', homework_score: '作业分数',
+        study_hours: '学习时长', attendance_count: '出勤次数', practice_count: '刷题数'
+      }
+      return map[col] || col
     }
   },
   computed: {
+    targetColumnOptions() {
+      // 推荐优先，其次数值列，去重
+      const rec = Array.isArray(this.targetOptions.recommended_targets) ? this.targetOptions.recommended_targets : []
+      const nums = Array.isArray(this.targetOptions.numeric_columns) ? this.targetOptions.numeric_columns : []
+      const all = [...rec, ...nums]
+      const seen = new Set()
+      return all.filter(c => {
+        if (seen.has(c)) return false
+        seen.add(c); return true
+      })
+    },
     processedModelResults() {
       const raw = this.trainResult && this.trainResult.model_results
       if (!raw) return []

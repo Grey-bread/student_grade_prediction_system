@@ -19,8 +19,8 @@
                 </el-option>
               </el-select>
             </el-form-item>
-            <el-form-item label="学生ID" v-if="trendType === 'individual'">
-              <el-input-number v-model="selectedStudentId" :min="1" :max="500" @change="loadChartData"></el-input-number>
+            <el-form-item label="学生ID">
+              <el-input-number v-model="selectedStudentId" :min="1" :max="999999" @change="onStudentIdChange" />
             </el-form-item>
             <el-form-item>
               <el-button type="primary" @click="loadChartData" icon="Refresh">刷新图表</el-button>
@@ -30,75 +30,80 @@
         </el-card>
 
         <el-row :gutter="20">
-          <!-- 成绩趋势图 -->
+          <!-- 学生详情 -->
           <el-col :span="24">
-            <el-card class="chart-card" v-loading="loading.trend">
+            <el-card class="chart-card" v-loading="loading.detail">
               <template #header>
                 <div class="card-header">
-                  <span class="chart-title">📈 成绩趋势分析</span>
-                  <el-radio-group v-model="trendType" size="small" @change="handleTrendTypeChange">
-                    <el-radio-button label="individual">个人成绩</el-radio-button>
-                    <el-radio-button label="class">班级平均</el-radio-button>
-                    <el-radio-button label="subject">学科对比</el-radio-button>
-                  </el-radio-group>
+                  <span class="chart-title">🧑‍🎓 学生详情</span>
                 </div>
               </template>
-              <div class="chart-container" ref="trendChart"></div>
+              <div style="display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start;">
+                <div style="flex:1; min-width:280px;">
+                  <div v-if="studentDetail.profile" class="detail-profile">
+                    <el-descriptions :column="3" size="small" border>
+                      <el-descriptions-item label="ID">{{ studentDetail.profile.student_id }}</el-descriptions-item>
+                      <el-descriptions-item label="学号">{{ studentDetail.profile.student_no }}</el-descriptions-item>
+                      <el-descriptions-item label="姓名">{{ studentDetail.profile.name }}</el-descriptions-item>
+                      <el-descriptions-item label="性别">{{ studentDetail.profile.gender }}</el-descriptions-item>
+                      <el-descriptions-item label="年级">{{ studentDetail.profile.grade }}</el-descriptions-item>
+                      <el-descriptions-item label="班级">{{ studentDetail.profile.class }}</el-descriptions-item>
+                      <el-descriptions-item label="电话">{{ studentDetail.profile.contact_phone }}</el-descriptions-item>
+                      <el-descriptions-item label="邮箱">{{ studentDetail.profile.email }}</el-descriptions-item>
+                    </el-descriptions>
+                  </div>
+                  <div v-else class="empty-container"><el-empty description="请选择一个有效的学生ID" /></div>
+                  <div v-if="studentDetail.grades" class="detail-grades" style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+                    <el-tag type="info">高数平均: {{ fmtNum(studentDetail.grades.calculus_avg_score ?? studentDetail.grades.total_score ?? studentDetail.grades.calculus_score) }}</el-tag>
+                    <el-tag type="success">第一次: {{ fmtNum(studentDetail.grades.first_calculus_score ?? studentDetail.grades.calculus_score) }}</el-tag>
+                    <el-tag type="success">第二次: {{ fmtNum(studentDetail.grades.second_calculus_score) }}</el-tag>
+                    <el-tag type="success">第三次: {{ fmtNum(studentDetail.grades.third_calculus_score) }}</el-tag>
+                    <el-tag>学习时长: {{ fmtNum(studentDetail.grades.study_hours) }}</el-tag>
+                    <el-tag type="warning">出勤: {{ fmtNum(studentDetail.grades.attendance_count) }}</el-tag>
+                    <el-tag type="danger">作业: {{ fmtNum(studentDetail.grades.homework_score) }}</el-tag>
+                    <el-tag type="info">刷题: {{ fmtNum(studentDetail.grades.practice_count) }}</el-tag>
+                  </div>
+                  <div v-if="studentDetail.percentiles" style="margin-top:8px;">
+                    <el-alert type="success" :closable="false" show-icon
+                      :title="`分位：高数平均 ${fmtNum(studentDetail.percentiles.calculus_avg_score)}%`" />
+                  </div>
+                </div>
+                <div style="flex:1; min-width:280px;">
+                  <div class="chart-container small" ref="detailChart"></div>
+                </div>
+              </div>
             </el-card>
           </el-col>
         </el-row>
 
+
         <el-row :gutter="20">
-          <!-- 成绩分布图 -->
+          <!-- 成绩分布图（左半行） -->
           <el-col :span="12">
             <el-card class="chart-card" v-loading="loading.distribution">
               <template #header>
                 <div class="card-header">
-                  <span class="chart-title">📊 成绩分布分析</span>
+                  <span class="chart-title">📊 多因素对高数成绩的影响</span>
                 </div>
               </template>
               <div class="chart-container small" ref="distributionChart"></div>
             </el-card>
           </el-col>
-
-          <!-- 学生进步情况 -->
-          <el-col :span="12">
-            <el-card class="chart-card" v-loading="loading.progress">
-              <template #header>
-                <div class="card-header">
-                  <span class="chart-title">🚀 学生进步情况</span>
-                </div>
-              </template>
-              <div class="chart-container small" ref="progressChart"></div>
-            </el-card>
-          </el-col>
-        </el-row>
-
-        <el-row :gutter="20">
-          <!-- 雷达图 - 学生综合能力 -->
-          <el-col :span="12">
-            <el-card class="chart-card" v-loading="loading.radar">
-              <template #header>
-                <div class="card-header">
-                  <span class="chart-title">🎯 课堂表现雷达图</span>
-                </div>
-              </template>
-              <div class="chart-container small" ref="radarChart"></div>
-            </el-card>
-          </el-col>
-
-          <!-- 饼图 - 成绩等级分布 -->
+          
+          <!-- 饼图 - 分数段占比（右半行） -->
           <el-col :span="12">
             <el-card class="chart-card" v-loading="loading.pie">
               <template #header>
                 <div class="card-header">
-                  <span class="chart-title">🥧 成绩等级分布</span>
+                  <span class="chart-title">🥧 分数段占比（40-60 / 60-80 / 80-100）</span>
                 </div>
               </template>
               <div class="chart-container small" ref="pieChart"></div>
             </el-card>
           </el-col>
         </el-row>
+
+        <!-- 底部行移除（避免空白占位） -->
       </el-tab-pane>
 
       <!-- 数据表可视化标签页 -->
@@ -296,10 +301,10 @@ export default {
   data() {
     return {
       activeTab: 'charts',
-      trendType: 'individual',  // 默认为个人成绩
-      chartDataTable: 'exam_scores',  // 默认为考试成绩表
+  chartDataTable: 'university_grades', 
       chartTables: [], // 图表可选表
-      selectedStudentId: 1,  // 默认显示学生1的成绩
+  selectedStudentId: 1,
+      studentDetail: { profile: null, grades: null, percentiles: null, factors: [] },
       
       // CRUD对话框
       dialogVisible: false,
@@ -310,9 +315,9 @@ export default {
       
       // Loading states
       loading: {
-        trend: false,
+        detail: false,
         distribution: false,
-        progress: false,
+        
         radar: false,
         pie: false,
         save: false,
@@ -322,17 +327,19 @@ export default {
       
       // Chart instances
       charts: {
-        trend: null,
+        detail: null,
         distribution: null,
-        progress: null,
+        
         radar: null,
-        pie: null
+        pie: null,
+        predScatter: null,
+        fiBar: null
       },
       
       // 数据表配置
       tableConfig: {
-        tables: ['students', 'exam_scores', 'class_performance', 'historical_grades'],
-        selectedTable: 'students',  // 默认为学生信息表
+  tables: ['students', 'university_grades'],
+  selectedTable: 'students',  // 默认为学生信息表
         searchQuery: '',
         tableData: [],
         total: 0,
@@ -342,9 +349,7 @@ export default {
         pageSize: 20,
         tableLabels: {
           students: '学生信息表',
-          exam_scores: '考试成绩表',
-          class_performance: '课堂表现表',
-          historical_grades: '历史成绩表'
+          university_grades: '大学成绩表'
         },
         // 表结构配置
         tableConfigs: {
@@ -358,8 +363,7 @@ export default {
               { prop: 'class', label: '班级', type: 'category' },
               { prop: 'birth_date', label: '出生日期', type: 'date' },
               { prop: 'contact_phone', label: '联系电话', type: 'text' },
-              { prop: 'email', label: '邮箱', type: 'text' },
-              { prop: 'status', label: '状态', type: 'category' }
+              { prop: 'email', label: '邮箱', type: 'text' }
             ]
           },
           exam_scores: {
@@ -406,9 +410,31 @@ export default {
               { prop: 'ranking', label: '排名', type: 'number' },
               { prop: 'teacher_id', label: '教师ID', type: 'id' }
             ]
+          },
+          university_grades: {
+            columns: [
+              { prop: 'student_id', label: '学生ID', type: 'id' },
+              { prop: 'student_no', label: '学号', type: 'text' },
+              { prop: 'first_calculus_score', label: '高数第一次', type: 'score' },
+              { prop: 'second_calculus_score', label: '高数第二次', type: 'score' },
+              { prop: 'third_calculus_score', label: '高数第三次', type: 'score' },
+              { prop: 'calculus_avg_score', label: '高数平均', type: 'score' },
+              { prop: 'study_hours', label: '学习时长', type: 'number' },
+              { prop: 'attendance_count', label: '出勤次数', type: 'number' },
+              { prop: 'homework_score', label: '作业分数', type: 'score' },
+              { prop: 'practice_count', label: '刷题数', type: 'number' }
+            ]
           }
         }
       }
+      ,
+      // 预测相关
+      predictTargetOptions: [],
+      predictConfig: {
+        targetColumn: '',
+        testSize: 0.2
+      },
+      predictResult: null
     }
   },
   
@@ -494,20 +520,22 @@ export default {
   },
 
   methods: {
+    async onStudentIdChange() {
+      await this.loadStudentDetail()
+      await this.updateDetailChart()
+      // 学生切换时，同步刷新“多因素影响”图，传入 student_id 以限定同侪范围
+      await this.updateDistributionChart()
+    },
     initCharts() {
       this.$nextTick(() => {
-        if (this.$refs.trendChart) {
-          this.charts.trend = echarts.init(this.$refs.trendChart)
-          console.log('趋势图初始化完成')
+        if (this.$refs.detailChart) {
+          this.charts.detail = echarts.init(this.$refs.detailChart)
         }
         if (this.$refs.distributionChart) {
           this.charts.distribution = echarts.init(this.$refs.distributionChart)
           console.log('分布图初始化完成')
         }
-        if (this.$refs.progressChart) {
-          this.charts.progress = echarts.init(this.$refs.progressChart)
-          console.log('进步图初始化完成')
-        }
+        
         if (this.$refs.radarChart) {
           this.charts.radar = echarts.init(this.$refs.radarChart)
           console.log('雷达图初始化完成')
@@ -516,7 +544,31 @@ export default {
           this.charts.pie = echarts.init(this.$refs.pieChart)
           console.log('饼图初始化完成')
         }
+        if (this.$refs.predScatterChart) {
+          this.charts.predScatter = echarts.init(this.$refs.predScatterChart)
+        }
+        if (this.$refs.fiBarChart) {
+          this.charts.fiBar = echarts.init(this.$refs.fiBarChart)
+        }
       })
+    },
+    async fetchPredictColumns() {
+      try {
+        if (!this.chartDataTable) { this.predictTargetOptions = []; return }
+        const res = await axios.get('/api/analysis/columns', { params: { table: this.chartDataTable } })
+        if (res.data?.status === 'success') {
+          const rec = res.data.recommended_targets || []
+          const nums = res.data.numeric_columns || []
+          const all = [...rec, ...nums]
+          const set = new Set()
+          this.predictTargetOptions = all.filter(c => (set.has(c) ? false : (set.add(c), true)))
+          if (this.predictConfig.targetColumn && !this.predictTargetOptions.includes(this.predictConfig.targetColumn)) {
+            this.predictConfig.targetColumn = ''
+          }
+        }
+      } catch (e) {
+        console.warn('加载预测列失败:', e)
+      }
     },
 
     handleResize() {
@@ -525,7 +577,7 @@ export default {
       })
     },
 
-    handleTabChange(tabName) {
+  handleTabChange(tabName) {
       if (tabName === 'charts') {
         // 重新初始化图表以避免隐藏/显示导致的实例失效或残留配置
         this.$nextTick(() => {
@@ -538,11 +590,13 @@ export default {
               }
             })
             // 重新创建实例（仅当对应容器存在）
-            if (this.$refs.trendChart) this.charts.trend = echarts.init(this.$refs.trendChart)
+            if (this.$refs.detailChart) this.charts.detail = echarts.init(this.$refs.detailChart)
             if (this.$refs.distributionChart) this.charts.distribution = echarts.init(this.$refs.distributionChart)
-            if (this.$refs.progressChart) this.charts.progress = echarts.init(this.$refs.progressChart)
+            
             if (this.$refs.radarChart) this.charts.radar = echarts.init(this.$refs.radarChart)
             if (this.$refs.pieChart) this.charts.pie = echarts.init(this.$refs.pieChart)
+            if (this.$refs.predScatterChart) this.charts.predScatter = echarts.init(this.$refs.predScatterChart)
+            if (this.$refs.fiBarChart) this.charts.fiBar = echarts.init(this.$refs.fiBarChart)
           } catch (e) {
             console.warn('图表重新初始化失败:', e)
           }
@@ -568,268 +622,99 @@ export default {
       }
     },
 
-    handleTrendTypeChange() {
-      this.loadChartData()
-    },
+    // 趋势类型已移除
 
     async loadChartData() {
+      // 先拉取学生详情，再并行渲染其他图表
+      await this.loadStudentDetail()
       await Promise.all([
-        this.updateTrendChart(),
+        this.updateDetailChart(),
         this.updateDistributionChart(),
-        this.updateProgressChart(),
-        this.updateRadarChart(),
         this.updatePieChart()
       ])
     },
 
-    async updateTrendChart() {
-      if (!this.charts.trend) return
-      
-      this.loading.trend = true
+    async loadStudentDetail() {
       try {
-        let response
-        let apiUrl = ''
-        let params = { table: this.chartDataTable }
-        
-        if (this.trendType === 'individual') {
-          // 如果是个人趋势但没有选择学生ID,跳过加载
-          if (!this.selectedStudentId) {
-            console.warn('个人趋势需要选择学生ID')
-            this.loading.trend = false
-            return
+        if (!this.selectedStudentId) return
+        const res = await axios.get('/api/analysis/student-detail', { params: { student_id: this.selectedStudentId } })
+        if (res.data?.status === 'success') {
+          this.studentDetail = {
+            profile: res.data.profile || null,
+            grades: res.data.grades || null,
+            percentiles: res.data.percentiles || null,
+            factors: Array.isArray(res.data.factors) ? res.data.factors : []
           }
-          apiUrl = '/api/analysis/student-trends'
-          params.student_id = this.selectedStudentId
-        } else if (this.trendType === 'class') {
-          apiUrl = '/api/analysis/class-trends'
-        } else if (this.trendType === 'subject') {
-          apiUrl = '/api/analysis/subject-comparison'
+          // 仅更新数据，渲染由 updateDetailChart 统一处理
         }
-        
-        response = await axios.get(apiUrl, { params })
-        
-        if (response.data.status === 'success') {
-          const option = {
-            title: {
-              text: this.getTrendTitle(),
-              left: 'center'
-            },
-            tooltip: {
-              trigger: 'axis'
-            },
-            legend: {
-              data: response.data.legend || [],
-              top: 30
-            },
-            grid: {
-              left: '3%',
-              right: '4%',
-              bottom: '3%',
-              containLabel: true
-            },
-            xAxis: {
-              type: 'category',
-              data: response.data.labels || response.data.exams || [],
-              boundaryGap: false
-            },
-            yAxis: {
-              type: 'value',
-              name: '分数'
-            },
-            series: (response.data.series || [])
-              .filter(s => s && typeof s === 'object')
-              .map(s => ({
-                name: s?.name || '未知系列',
-                type: typeof s?.type === 'string' ? s.type : 'line',
-                data: Array.isArray(s?.data) ? s.data.map(v => (typeof v === 'number' ? v : (isNaN(Number(v)) ? 0 : Number(v)))) : [],
-                smooth: true
-              }))
-          }
-          // 最终兜底：若 series 为空或存在非对象项，使用占位系列避免 ECharts 内部读取 undefined.type
-          if (!Array.isArray(option.series) || option.series.length === 0) {
-            option.series = [{ name: '暂无数据', type: 'line', data: [] }]
-          } else {
-            option.series = option.series.filter(s => s && typeof s === 'object' && typeof s.type === 'string')
-            if (option.series.length === 0) {
-              option.series = [{ name: '暂无数据', type: 'line', data: [] }]
-            }
-          }
-          console.debug('趋势图 option.series 最终送入:', option.series)
-          
-          // 避免保留历史无效系列导致渲染异常
-          this.charts.trend.clear()
-          try {
-            this.charts.trend.setOption(option, true)
-          } catch (e) {
-            console.error('趋势图 setOption 异常，已回退为空系列:', e)
-            this.charts.trend.setOption({
-              xAxis: { type: 'category', data: [] },
-              yAxis: { type: 'value' },
-              series: [{ name: '暂无数据', type: 'line', data: [] }]
-            }, true)
-          }
-        }
-      } catch (error) {
-        console.error('加载趋势数据失败:', error)
-        ElMessage.error('加载趋势数据失败')
-      } finally {
-        this.loading.trend = false
+      } catch (e) {
+        console.warn('加载学生详情失败:', e)
       }
     },
 
-    getTrendTitle() {
-      if (this.trendType === 'individual') {
-        return `学生${this.selectedStudentId}成绩趋势`
-      } else if (this.trendType === 'class') {
-        return '班级平均成绩趋势'
-      } else {
-        return '学科成绩对比'
+    async updateDetailChart() {
+      if (!this.charts.detail) return
+      this.loading.detail = true
+      try {
+        const factors = this.studentDetail?.factors || []
+        const option = {
+          title: { text: '学习投入与行为（该生）', left: 'center' },
+          tooltip: { trigger: 'axis' },
+          grid: { left: '8%', right: '5%', bottom: '10%', top: '18%' },
+          xAxis: { type: 'category', data: factors.map(f => f.name) },
+          yAxis: { type: 'value' },
+          series: [{ type: 'bar', data: factors.map(f => Number(f.value) || 0), barWidth: '50%' }]
+        }
+        this.charts.detail.clear()
+        this.charts.detail.setOption(option, true)
+      } catch (e) {
+        console.warn('渲染学生详情图失败:', e)
+      } finally {
+        this.loading.detail = false
       }
     },
+
+    // 趋势标题已移除
 
     async updateDistributionChart() {
       if (!this.charts.distribution) return
-      
       this.loading.distribution = true
       try {
-        const params = { table: this.chartDataTable }
-        
-        // 如果选择了学生ID，添加到参数中
-        if (this.trendType === 'individual' && this.selectedStudentId) {
-          params.student_id = this.selectedStudentId
-        }
-        
-        const response = await axios.get('/api/analysis/score-distribution', { params })
-        
-        if (response.data.status === 'success') {
-          console.log('分布图数据:', response.data)
-          
+        if (this.chartDataTable === 'university_grades') {
+          const params = { buckets: 5, table: this.chartDataTable }
+          if (this.selectedStudentId) params.student_id = this.selectedStudentId
+          const res = await axios.get('/api/analysis/ug/calculus-by-factors-bucket', { params })
+          const series = (res.data?.series || []).map(s => ({ name: s.name, type: 'line', data: s.data, smooth: true }))
           const option = {
-            title: {
-              text: '历史成绩分布分析',
-              left: 'center',
-              subtext: this.trendType === 'individual' && this.selectedStudentId 
-                ? `学生${this.selectedStudentId}的成绩分布` 
-                : '全部学生平均成绩分布'
-            },
-            tooltip: {
-              trigger: 'axis',
-              axisPointer: {
-                type: 'shadow'
-              },
-              formatter: '{b}: {c}分'
-            },
-            xAxis: {
-              type: 'category',
-              data: response.data.features || [],
-              axisLabel: {
-                interval: 0,
-                fontSize: 12
-              }
-            },
-            yAxis: {
-              type: 'value',
-              name: '平均分',
-              min: 0,
-              max: 100
-            },
-            grid: {
-              bottom: '15%',
-              left: '12%',
-              right: '5%',
-              top: '20%'
-            },
-            series: [{
-              type: 'bar',
-              data: response.data.data || [],
-              barWidth: '50%',
-              itemStyle: {
-                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-                  { offset: 0, color: '#83bff6' },
-                  { offset: 0.5, color: '#188df0' },
-                  { offset: 1, color: '#188df0' }
-                ])
-              },
-              label: {
-                show: true,
-                position: 'top',
-                formatter: '{c}分'
-              }
-            }]
+            title: { text: '多因素对高数成绩的影响（分位曲线）', left: 'center' },
+            tooltip: { trigger: 'axis' },
+            legend: { top: 28 },
+            xAxis: { type: 'category', data: res.data?.labels || [] },
+            yAxis: { type: 'value', name: '平均高数成绩' },
+            series
           }
-          
-          this.charts.distribution.setOption(option)
+          this.charts.distribution.setOption(option, true)
+        } else if (this.chartDataTable === 'students') {
+          const res = await axios.get('/api/analysis/students/category-distribution')
+          const grade = (res.data?.data?.grade || [])
+          const option = {
+            title: { text: '年级分布', left: 'center' },
+            tooltip: { trigger: 'axis' },
+            xAxis: { type: 'category', data: grade.map(i => i.name) },
+            yAxis: { type: 'value' },
+            series: [{ type: 'bar', data: grade.map(i => i.value) }]
+          }
+          this.charts.distribution.setOption(option, true)
         }
       } catch (error) {
-        console.error('加载分布数据失败:', error)
-        ElMessage.error('加载分布数据失败')
+        console.error('加载可视化二失败:', error)
+        ElMessage.error('加载可视化二失败')
       } finally {
         this.loading.distribution = false
       }
     },
 
-    async updateProgressChart() {
-      if (!this.charts.progress) return
-      
-      this.loading.progress = true
-      try {
-        const params = { table: this.chartDataTable }
-        
-        // 如果选择了学生ID，添加到参数中
-        if (this.trendType === 'individual' && this.selectedStudentId) {
-          params.student_id = this.selectedStudentId
-        }
-        
-        const response = await axios.get('/api/analysis/student-progress', { params })
-        
-        if (response.data.status === 'success') {
-          const option = {
-            title: {
-              text: this.trendType === 'individual' 
-                ? `学生${this.selectedStudentId}进步情况` 
-                : '整体进步情况',
-              left: 'center'
-            },
-            tooltip: {
-              trigger: 'axis'
-            },
-            xAxis: {
-              type: 'category',
-              data: response.data.labels || []
-            },
-            yAxis: {
-              type: 'value',
-              name: '进步幅度 (%)'
-            },
-            series: [{
-              type: 'line',
-              data: response.data.progress || [],
-              smooth: true,
-              areaStyle: {
-                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-                  { offset: 0, color: 'rgba(103, 194, 58, 0.3)' },
-                  { offset: 1, color: 'rgba(103, 194, 58, 0.1)' }
-                ])
-              },
-              lineStyle: {
-                width: 3,
-                color: '#67C23A'
-              },
-              itemStyle: {
-                color: '#67C23A'
-              }
-            }]
-          }
-          
-          this.charts.progress.setOption(option)
-        }
-      } catch (error) {
-        console.error('加载进步数据失败:', error)
-        ElMessage.error('加载进步数据失败')
-      } finally {
-        this.loading.progress = false
-      }
-    },
+    
 
     async updateRadarChart() {
       if (!this.charts.radar) return
@@ -841,7 +726,7 @@ export default {
         }
         
         // 如果选择了学生ID，添加到参数中
-        if (this.trendType === 'individual' && this.selectedStudentId) {
+        if (this.selectedStudentId) {
           params.student_id = this.selectedStudentId
         }
         
@@ -922,77 +807,30 @@ export default {
 
     async updatePieChart() {
       if (!this.charts.pie) return
-      
       this.loading.pie = true
       try {
-        const params = { 
-          table: this.chartDataTable  // 使用所选数据表
-        }
-        
-        // 饼图始终使用全部学生数据，不传student_id参数
-        
-        const response = await axios.get('/api/analysis/grade-distribution', { params })
-        
-        if (response.data.status === 'success') {
-          // 打印数据用于调试
-          console.log('饼图数据:', response.data)
-          
-          // 不过滤，显示所有等级（包括0人的）
-          const pieData = response.data.data
-          const total = response.data.total || pieData.reduce((sum, item) => sum + item.value, 0)
-          const statMethod = response.data.stat_method === 'student_most_common_level' ? '按学生主要等级' : '按考试记录'
-          
-          const option = {
-            title: {
-              text: '考试成绩等级分布',
-              left: 'center',
-              subtext: `${statMethod} | 共${total}名学生`
-            },
-            tooltip: {
-              trigger: 'item',
-              formatter: function(params) {
-                return `${params.seriesName}<br/>${params.name}: ${params.value}人 (${params.percent}%)`
-              }
-            },
-            legend: {
-              orient: 'vertical',
-              left: 'left',
-              top: 'middle',
-              data: pieData.map(item => item.name)
-            },
-            series: [{
-              name: '成绩等级',
-              type: 'pie',
-              radius: ['40%', '70%'],
-              avoidLabelOverlap: false,
-              itemStyle: {
-                borderRadius: 10,
-                borderColor: '#fff',
-                borderWidth: 2
-              },
-              label: {
-                show: true,
-                formatter: function(params) {
-                  // 只显示有数据的标签
-                  if (params.value > 0) {
-                    return `${params.name}: ${params.value}人\n${params.percent}%`
-                  }
-                  return ''
-                }
-              },
-              emphasis: {
-                label: {
-                  show: true,
-                  fontSize: '16',
-                  fontWeight: 'bold'
-                }
-              },
-              minAngle: 5, // 最小扇区角度，确保小值也能显示
-              data: pieData
-            }]
+        if (this.chartDataTable === 'university_grades') {
+          const response = await axios.get('/api/analysis/score-band-distribution', { params: { table: 'university_grades' } })
+          if (response.data.status === 'success') {
+            const pieData = response.data.data || []
+            const total = response.data.total || pieData.reduce((sum, item) => sum + (item.value || 0), 0)
+            const option = {
+              title: { text: '分数段占比', left: 'center', subtext: `总计 ${total} 条记录` },
+              tooltip: { trigger: 'item', formatter: p => `${p.name}: ${p.value} (${p.percent}%)` },
+              legend: { orient: 'vertical', left: 'left', top: 'middle', data: pieData.map(i => i.name) },
+              series: [{ name: '分数段', type: 'pie', radius: ['40%', '70%'], data: pieData }]
+            }
+            this.charts.pie.setOption(option, true)
           }
-          
-          this.charts.pie.setOption(option)
+        } else if (this.chartDataTable === 'students') {
+          const res = await axios.get('/api/analysis/students/category-distribution')
+          const grade = (res.data?.data?.grade || [])
+          const option = {
+            title: { text: '学生年级占比', left: 'center' },
+            tooltip: { trigger: 'item', formatter: p => `${p.name}: ${p.value} (${p.percent}%)` },
+            series: [{ type: 'pie', radius: '60%', data: grade }]
+          }
+          this.charts.pie.setOption(option, true)
         }
       } catch (error) {
         console.error('加载饼图数据失败:', error)
@@ -1001,18 +839,84 @@ export default {
         this.loading.pie = false
       }
     },
+
+    async runPrediction() {
+      this.loading.predict = true
+      try {
+        const body = {
+          table: this.chartDataTable,
+          targetColumn: this.predictConfig.targetColumn || undefined,
+          testSize: this.predictConfig.testSize,
+          previewLimit: 50
+        }
+        const res = await axios.post('/api/training/predict-table', body)
+        if (res.data?.status === 'success') {
+          this.predictResult = res.data.data || res.data
+          this.renderPredictCharts()
+          this.$nextTick(() => this.handleResize())
+        } else {
+          this.predictResult = null
+        }
+      } catch (e) {
+        console.error('预测失败:', e)
+        this.predictResult = null
+      } finally {
+        this.loading.predict = false
+      }
+    },
+
+    renderPredictCharts() {
+      // 散点：实际 vs 预测
+      try {
+        if (this.charts.predScatter && this.predictResult?.predictions) {
+          const actual = this.predictResult.predictions.actual || []
+          const predicted = this.predictResult.predictions.predicted || []
+          const points = actual.map((y, i) => [y, predicted[i]])
+          const option = {
+            title: { text: '预测值 vs 实际值', left: 'center' },
+            xAxis: { name: '实际值' },
+            yAxis: { name: '预测值' },
+            tooltip: { trigger: 'item', formatter: (p) => `实际: ${p.value[0]}<br/>预测: ${p.value[1]}` },
+            series: [{ type: 'scatter', data: points, symbolSize: 6 }]
+          }
+          this.charts.predScatter.setOption(option, true)
+        }
+      } catch (e) { console.warn('散点渲染失败', e) }
+
+      // 柱状：特征重要性
+      try {
+        if (this.charts.fiBar && Array.isArray(this.predictResult?.feature_importance)) {
+          const fi = this.predictResult.feature_importance.slice(0, 10)
+          const option = {
+            title: { text: 'Top10 特征重要性', left: 'center' },
+            grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+            xAxis: { type: 'value' },
+            yAxis: { type: 'category', data: fi.map(x => x.feature) },
+            series: [{ type: 'bar', data: fi.map(x => x.importance) }]
+          }
+          this.charts.fiBar.setOption(option, true)
+        }
+      } catch (e) { console.warn('特征重要性渲染失败', e) }
+    },
+
+    fmtNum(v) {
+      if (v === null || v === undefined) return '-'
+      const n = Number(v)
+      return isNaN(n) ? '-' : n.toFixed(4)
+    },
     // 加载可用于图表的数据表列表
     async fetchChartTables() {
       try {
         const res = await axios.get('/api/analysis/tables')
         if (res.data?.status === 'success') {
-          this.chartTables = res.data.tables || []
-          // 初始化默认选择
+          this.chartTables = (res.data.tables || []).filter(t => ['students','university_grades'].includes(t))
+          // 初始化默认选择，优先使用 university_grades
           if (!this.chartTables.includes(this.chartDataTable)) {
-            if (this.chartTables.includes('exam_scores')) this.chartDataTable = 'exam_scores'
-            else if (this.chartTables.includes('historical_grades')) this.chartDataTable = 'historical_grades'
+            if (this.chartTables.includes('university_grades')) this.chartDataTable = 'university_grades'
+            else if (this.chartTables.includes('students')) this.chartDataTable = 'students'
             else if (this.chartTables.length > 0) this.chartDataTable = this.chartTables[0]
           }
+          await this.fetchPredictColumns()
         }
       } catch (e) {
         console.warn('加载表清单失败:', e)
@@ -1023,6 +927,7 @@ export default {
     handleTableChange() {
       this.tableConfig.currentPage = 1
       this.fetchTableData()
+      this.fetchPredictColumns()
     },
 
     async fetchTableData() {
@@ -1112,8 +1017,7 @@ export default {
         this.loading.exportReport = true
         const params = {
           table: this.chartDataTable,
-          trendType: this.trendType,
-          student_id: this.trendType === 'individual' ? this.selectedStudentId : undefined
+          student_id: this.selectedStudentId || undefined
         }
         const res = await axios.get('/api/analysis/export-report', {
           params,
@@ -1150,6 +1054,15 @@ export default {
       if (map[table]) return map[table]
       if (/[^\x00-\x7F]/.test(String(table))) return table
       return this.translateTableName(table)
+    },
+    translateColumnName(col) {
+      const map = {
+        total_score: '总成绩', final_score: '期末成绩', midterm_score: '期中成绩', usual_score: '平时成绩',
+        score: '分数', ranking: '排名',
+        calculus_score: '高等数学成绩', homework_score: '作业分数',
+        study_hours: '学习时长', attendance_count: '出勤次数', practice_count: '刷题数'
+      }
+      return map[col] || col
     },
     translateTableName(name) {
       const dict = {
@@ -1300,6 +1213,7 @@ export default {
     getPrimaryKeyValue(row) {
       const primaryKeys = {
         'students': 'student_id',
+        'university_grades': 'student_id',
         'exam_scores': 'score_id',
         'class_performance': 'performance_id',
         'historical_grades': 'grade_id'
@@ -1311,6 +1225,7 @@ export default {
     isPrimaryKey(prop) {
       const primaryKeys = {
         'students': 'student_id',
+        'university_grades': 'student_id',
         'exam_scores': 'score_id',
         'class_performance': 'performance_id',
         'historical_grades': 'grade_id'
@@ -1339,11 +1254,6 @@ export default {
   },
 
   watch: {
-    trendType: {
-      handler() {
-        this.updateTrendChart()
-      }
-    },
     'tableConfig.selectedTable': {
       handler() {
         this.tableConfig.currentPage = 1

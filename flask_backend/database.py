@@ -11,8 +11,18 @@
 """
 
 # flask_backend/database.py
-import mysql.connector
-from mysql.connector import Error
+# 尝试导入 mysql-connector，若不可用则进入降级模式（CSV/只读端点可继续运行）
+try:
+    import mysql.connector
+    from mysql.connector import Error
+    HAS_MYSQL = True
+except Exception as e:
+    HAS_MYSQL = False
+    mysql = None
+    class Error(Exception):
+        pass
+    print("[WARN] mysql-connector-python 未安装或导入失败，将以降级模式运行（优先使用 CSV 数据）。")
+    print("       建议安装: pip install mysql-connector-python")
 import os
 from pathlib import Path
 
@@ -56,6 +66,11 @@ def get_connection():
         print(f"数据库连接配置: host={host}, user={user}, database={database}, password={'*' * len(password) if password else '(空)'}")
 
     try:
+        if not HAS_MYSQL:
+            raise ConnectionError(
+                "未检测到 mysql-connector-python，无法建立数据库连接。\n"
+                "请运行: pip install mysql-connector-python，或配置 .env 关闭数据库依赖。"
+            )
         return mysql.connector.connect(
             host=host,
             user=user,

@@ -86,15 +86,28 @@ class PredictionService:
         # 数据预处理
         df, enc = preprocess_df(df)
         
-        # 目标列识别
+        # 目标列识别（支持中文字段名）
         if target_col is None:
-            candidates = [c for c in df.columns if any(k in c.lower() for k in ('gpa','grade','score','final'))]
+            # 英文关键词
+            en_keys = ('gpa','grade','score','final','total')
+            # 中文关键词（优先级高一些）
+            zh_keys = ('总成绩','总分','分数','成绩','期末','期中','平时','总评')
+            candidates = []
+            # 先中文匹配
+            for c in df.columns:
+                if any(k in str(c) for k in zh_keys):
+                    candidates.append(c)
+            # 再英文匹配（不重复加入）
+            for c in df.columns:
+                cl = str(c).lower()
+                if any(k in cl for k in en_keys) and c not in candidates:
+                    candidates.append(c)
             if candidates:
                 target_col = candidates[0]
             else:
                 nums = df.select_dtypes(include=['int64','float64']).columns.tolist()
                 if not nums:
-                    raise ValueError('无法识别目标列，请确保文件包含成绩列（GPA/Score/Grade等）')
+                    raise ValueError('无法识别目标列，请确保数据包含成绩列（如“总成绩/总分/分数”等）或显式指定 targetColumn')
                 target_col = nums[-1]
                 
         if target_col not in df.columns:
