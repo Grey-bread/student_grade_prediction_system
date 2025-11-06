@@ -4,7 +4,6 @@
       <template #header>
         <div class="card-header">
           <h2>学生反馈</h2>
-          <span class="sub">后端可用则走接口；不可用时直接读取 CSV</span>
         </div>
       </template>
 
@@ -21,6 +20,7 @@
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="loading" @click="loadFeedback">生成反馈</el-button>
+          <el-button type="success" :disabled="!hasDetail" @click="saveFeedback" plain>保存</el-button>
         </el-form-item>
       </el-form>
 
@@ -113,6 +113,18 @@
           </div>
           <el-empty v-else description="暂无建议" />
         </el-card>
+
+        <!-- 历史记录（仅学生反馈） -->
+        <el-card class="section-card">
+          <template #header><div class="section-header">历史记录</div></template>
+          <el-timeline v-if="historyList.length">
+            <el-timeline-item v-for="h in historyList" :key="h.id" :timestamp="h.created_at" type="primary">
+              <el-tag size="small" type="info" style="margin-right:6px;">学生反馈</el-tag>
+              {{ h.summary || renderHistoryText(h) }}
+            </el-timeline-item>
+          </el-timeline>
+          <el-empty v-else description="暂无历史记录" />
+        </el-card>
       </div>
     </el-card>
   </div>
@@ -141,6 +153,7 @@ export default {
       trendFeedback: [],
       weaknessFeedback: [],
       suggestionFeedback: [],
+  historyList: [],
       classStats: { avgScore: null, avgHours: null, attemptAvg: { first: null, second: null, third: null } },
       
     }
@@ -221,6 +234,8 @@ export default {
         // 计算班级均值并生成三块反馈
         this.computeClassStats()
         this.buildThreeDimensionFeedback()
+  // 加载历史
+  await this.loadHistory()
         ElMessage.success('已生成反馈')
       } catch (e) {
         console.error(e)
@@ -228,6 +243,49 @@ export default {
       } finally {
         this.loading = false
       }
+    },
+    async saveFeedback() {
+      if (!this.hasDetail) { this.$message?.warning?.('请先生成反馈'); return }
+      try {
+        const payload = {
+          student_id: this.query.studentId,
+          detail: this.detail,
+          trendFeedback: this.trendFeedback,
+          weaknessFeedback: this.weaknessFeedback,
+          suggestionFeedback: this.suggestionFeedback,
+          source: 'student-feedback-ui'
+        }
+        const res = await axios.post('/api/analysis/student-feedback/save', payload)
+  if (res.data?.status === 'success') this.$message?.success?.('已保存到系统')
+        else this.$message?.error?.(res.data?.message || '保存失败')
+  // 保存后刷新历史
+  await this.loadHistory()
+      } catch (e) {
+        console.error(e)
+        this.$message?.error?.(e.response?.data?.message || e.message || '保存失败')
+      }
+    },
+    async loadHistory() {
+      try {
+        if (!this.query.studentId) return
+        const r = await axios.get('/api/analysis/student-feedback/history', { params: { student_id: this.query.studentId, limit: 100 } })
+        if (r.data?.status === 'success') {
+          const arr = Array.isArray(r.data.data) ? r.data.data : []
+          // 仅保留学生反馈，过滤掉 progress
+          this.historyList = arr.filter(it => String(it.entry_type || '').toLowerCase() !== 'progress')
+        }
+        else this.historyList = []
+      } catch { this.historyList = [] }
+    },
+    renderHistoryText(h) {
+      try {
+        const p = h?.payload || {}
+        const w = Array.isArray(p.weaknessFeedback) ? p.weaknessFeedback : (Array.isArray(p.weaknesses) ? p.weaknesses : [])
+        const s = Array.isArray(p.suggestionFeedback) ? p.suggestionFeedback : (Array.isArray(p.suggestions) ? p.suggestions : [])
+        const ww = w.filter(x=>x).slice(0,2)
+        const ss = s.filter(x=>x).slice(0,2)
+        return (ww.concat(ss).join('；')) || '生成反馈'
+      } catch { return '记录' }
     },
     async ensureUGLoadedPreferBackend() {
       if (this.csvUG.length) return

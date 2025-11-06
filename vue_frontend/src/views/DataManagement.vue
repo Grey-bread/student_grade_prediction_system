@@ -84,6 +84,7 @@
             <el-table :data="dataSources" style="width: 100%" border stripe empty-text="暂无数据源">
               <el-table-column prop="name" label="名称" min-width="160" />
               <el-table-column prop="type" label="类型" width="120" />
+              
               <el-table-column label="启用" width="120">
                 <template #default="scope">
                   <el-switch 
@@ -104,10 +105,11 @@
                   </el-tooltip>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="260" fixed="right">
+              <el-table-column label="操作" width="300" fixed="right">
                 <template #default="scope">
                   <el-button size="small" :disabled="!(scope.row.id > 0)" @click="editDataSource(scope.row)">编辑</el-button>
                   <el-button size="small" type="primary" :disabled="!scope.row.active || !(scope.row.id > 0)" @click="collectData(scope.row.id)">立即采集</el-button>
+                  <el-button type="text" size="small" @click="viewRuns(scope.row)">采集记录</el-button>
                   <template v-if="scope.row.id > 0">
                     <el-popconfirm title="确认删除该数据源？" confirm-button-text="删除" cancel-button-text="取消" @confirm="deleteDataSource(scope.row)">
                       <template #reference>
@@ -239,6 +241,20 @@
         </span>
       </template>
     </el-dialog>
+
+    <!-- 采集记录对话框 -->
+    <el-dialog v-model="runsVisible" :title="runsTitle" width="720px">
+      <el-table :data="runs" style="width:100%" border stripe empty-text="暂无记录">
+        <el-table-column prop="runAt" label="时间" width="180" />
+        <el-table-column prop="status" label="状态" width="100">
+          <template #default="scope">
+            <el-tag :type="scope.row.status === 'success' ? 'success' : 'danger'">{{ scope.row.status }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="deltaRows" label="变化行数" width="120" />
+        <el-table-column prop="error" label="错误信息" />
+      </el-table>
+    </el-dialog>
   </div>
 </template>
 
@@ -263,7 +279,10 @@ export default {
     // 数据，初始为空，将从后端获取
     const uploadHistory = ref([])
     const dataSources = ref([])
-    const collectionTasks = ref([])
+  const collectionTasks = ref([])
+  const runsVisible = ref(false)
+  const runsTitle = ref('采集记录')
+  const runs = ref([])
     
     // 加载真实数据（来自后端数据库）
     const loadData = async () => {
@@ -286,6 +305,8 @@ export default {
         console.error('加载数据失败: ', err)
       }
     }
+
+    // 后端已自动同步数据源，无需手动同步
     
   // 组件挂载时加载数据 + 定时刷新
   loadData()
@@ -530,6 +551,21 @@ export default {
       })
       simulateCollectionProgress(localId, !!taskId)
     }
+
+    // 查看采集记录
+    const viewRuns = async (source) => {
+      try {
+        runsTitle.value = `${source?.name || '采集'} - 最近记录`
+        const res = await axios.get('/api/analysis/collection-runs', { params: { source_id: source?.id, limit: 20 } })
+        runs.value = (res && res.data && res.data.data) || []
+        runsVisible.value = true
+      } catch (err) {
+        console.error('获取采集记录失败: ', err)
+        alert('无法获取采集记录')
+      }
+    }
+
+    // 已移除策略展示
     
     // 模拟采集进度
     // 存放本地任务的 interval，便于清空和取消
@@ -657,7 +693,12 @@ export default {
       clearTasks,
       formatDate,
       getStatusType,
-      getStatusProgress
+      getStatusProgress,
+      runsVisible,
+      runsTitle,
+      runs,
+      viewRuns,
+      
     }
   }
 }
@@ -797,6 +838,8 @@ export default {
   gap: 10px;
   margin: 8px 0 14px;
 }
+
+/* 移除诊断行样式 */
 
 .config-ellipsis {
   display: inline-block;

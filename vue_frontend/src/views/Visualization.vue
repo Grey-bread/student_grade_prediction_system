@@ -95,7 +95,7 @@
             <el-card class="chart-card" v-loading="loading.pie">
               <template #header>
                 <div class="card-header">
-                  <span class="chart-title">🥧 分数段占比（40-60 / 60-80 / 80-100）</span>
+                  <span class="chart-title">🥧 分数段占比</span>
                 </div>
               </template>
               <div class="chart-container small" ref="pieChart"></div>
@@ -239,6 +239,37 @@
     <!-- 新增/编辑对话框 -->
     <el-dialog v-model="dialogVisible" :title="dialogTitle" width="600px" @close="resetForm">
       <el-form :model="formData" label-width="120px" label-position="left">
+        <!-- UG 新增：先选择学生（学号/姓名），用于确定 student_id -->
+        <template v-if="tableConfig.selectedTable === 'university_grades'">
+          <el-form-item label="关联学生" v-if="dialogMode === 'create'">
+            <el-select
+              v-model="selectedStudentForForm"
+              filterable
+              :loading="studentOptionsLoading"
+              placeholder="按学号或姓名搜索选择学生"
+              style="width: 100%"
+              @visible-change="val => { if (val && !studentOptions.length) loadStudentOptions() }"
+              @change="onSelectStudent"
+            >
+              <el-option
+                v-for="stu in studentOptions"
+                :key="stu.student_id"
+                :label="formatStudentOption(stu)"
+                :value="stu.student_id"
+              >
+                <span style="float:left">{{ formatStudentOption(stu) }}</span>
+              </el-option>
+            </el-select>
+          </el-form-item>
+          <el-alert
+            v-if="dialogMode === 'create'"
+            type="info"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 10px"
+            title="请选择学生以自动填充 student_id（后端已开启校验，未选择将无法创建）"/>
+        </template>
+
         <template v-for="column in tableColumns" :key="column.prop">
           <!-- 跳过主键字段 -->
           <el-form-item v-if="!isPrimaryKey(column.prop)" :label="column.label">
@@ -312,6 +343,10 @@ export default {
       dialogMode: 'create', // 'create' 或 'edit'
       currentRecord: {},
       formData: {},
+    // UG 新增时的学生选择
+    studentOptions: [],
+    studentOptionsLoading: false,
+    selectedStudentForForm: null,
       
       // Loading states
       loading: {
@@ -561,7 +596,14 @@ export default {
           const nums = res.data.numeric_columns || []
           const all = [...rec, ...nums]
           const set = new Set()
-          this.predictTargetOptions = all.filter(c => (set.has(c) ? false : (set.add(c), true)))
+          let opts = all.filter(c => (set.has(c) ? false : (set.add(c), true)))
+          // 若为大学成绩表，限定为四个高数目标列
+          if (this.chartDataTable === 'university_grades') {
+            const allowed = ['first_calculus_score','second_calculus_score','third_calculus_score','calculus_avg_score']
+            const exists = allowed.filter(c => opts.includes(c))
+            if (exists.length) opts = exists
+          }
+          this.predictTargetOptions = opts
           if (this.predictConfig.targetColumn && !this.predictTargetOptions.includes(this.predictConfig.targetColumn)) {
             this.predictConfig.targetColumn = ''
           }
@@ -686,7 +728,7 @@ export default {
           const res = await axios.get('/api/analysis/ug/calculus-by-factors-bucket', { params })
           const series = (res.data?.series || []).map(s => ({ name: s.name, type: 'line', data: s.data, smooth: true }))
           const option = {
-            title: { text: '多因素对高数成绩的影响（分位曲线）', left: 'center' },
+            title: { text: '多因素对高数成绩的影响（分档：低→高）', left: 'center' },
             tooltip: { trigger: 'axis' },
             legend: { top: 28 },
             xAxis: { type: 'category', data: res.data?.labels || [] },
@@ -841,11 +883,16 @@ export default {
     },
 
     async runPrediction() {
+      // 需要用户手动选择目标列
+      if (!this.predictConfig?.targetColumn) {
+        ElMessage.warning('请先选择目标列（必选）')
+        return
+      }
       this.loading.predict = true
       try {
         const body = {
           table: this.chartDataTable,
-          targetColumn: this.predictConfig.targetColumn || undefined,
+          targetColumn: this.predictConfig.targetColumn,
           testSize: this.predictConfig.testSize,
           previewLimit: 50
         }
@@ -1144,6 +1191,18 @@ export default {
       this.dialogTitle = `新增${this.getTableLabel(this.tableConfig.selectedTable)}记录`
       this.formData = {}
       this.dialogVisible = true
+      // 若是 UG 表，预加载学生列表，并尝试用上方已选学生ID预选
+      if (this.tableConfig.selectedTable === 'university_grades') {
+        this.loadStudentOptions().then(() => {
+          if (this.selectedStudentId) {
+            const exists = this.studentOptions.find(s => s.student_id === this.selectedStudentId)
+            if (exists) {
+              this.selectedStudentForForm = this.selectedStudentId
+              this.onSelectStudent(this.selectedStudentId)
+            }
+          }
+        })
+      }
     },
 
     showEditDialog(row) {
@@ -1182,6 +1241,23 @@ export default {
     async saveRecord() {
       this.loading.save = true
       try {
+        // UG 创建前置校验：必须具备 student_id（或可映射字段）
+        if (this.dialogMode === 'create' && this.tableConfig.selectedTable === 'university_grades') {
+          const hasStudentId = !!this.formData.student_id
+          const hasStudentNo = !!this.formData.student_no
+          if (!hasStudentId && !hasStudentNo) {
+            this.loading.save = false
+            ElMessage.warning('请先选择关联学生（学号/姓名），以提供 student_id 或学号')
+            return
+          }
+          // 可选：若三次成绩齐全，前端先计算平均分，减少后端计算压力
+          const s1 = Number(this.formData.first_calculus_score)
+          const s2 = Number(this.formData.second_calculus_score)
+          const s3 = Number(this.formData.third_calculus_score)
+          if (!isNaN(s1) && !isNaN(s2) && !isNaN(s3)) {
+            this.formData.calculus_avg_score = Number(((s1 + s2 + s3) / 3).toFixed(2))
+          }
+        }
         let response
         if (this.dialogMode === 'create') {
           response = await axios.post(`/api/analysis/table/${this.tableConfig.selectedTable}/create`, this.formData)
@@ -1203,6 +1279,48 @@ export default {
       } finally {
         this.loading.save = false
       }
+    },
+
+    // 载入学生选项（用于 UG 新增）
+    async loadStudentOptions() {
+      if (this.studentOptions.length) return
+      this.studentOptionsLoading = true
+      try {
+        const resp = await axios.get('/api/analysis/table-data', {
+          params: { table: 'students', page: 1, page_size: 10000 }
+        })
+        if (resp.data?.status === 'success') {
+          const arr = Array.isArray(resp.data.data) ? resp.data.data : []
+          // 仅保留必要字段，避免大对象占用内存
+          this.studentOptions = arr.map(s => ({
+            student_id: s.student_id,
+            student_no: s.student_no,
+            name: s.name,
+            grade: s.grade,
+            class: s.class
+          }))
+        }
+      } catch (e) {
+        console.warn('加载学生列表失败:', e)
+      } finally {
+        this.studentOptionsLoading = false
+      }
+    },
+
+    formatStudentOption(stu) {
+      if (!stu) return ''
+      const no = stu.student_no ? `学号:${stu.student_no}` : '学号:未知'
+      const nm = stu.name ? `姓名:${stu.name}` : '姓名:未知'
+      const gc = [stu.grade, stu.class].filter(Boolean).join(' ')
+      return `${no} ｜ ${nm}${gc ? ' ｜ ' + gc : ''}`
+    },
+
+    onSelectStudent(val) {
+      const stu = this.studentOptions.find(s => s.student_id === val)
+      if (!stu) return
+      // 写入表单字段，确保后端能解析 student_id 或 student_no
+      this.formData.student_id = stu.student_id
+      if (stu.student_no) this.formData.student_no = stu.student_no
     },
 
     resetForm() {

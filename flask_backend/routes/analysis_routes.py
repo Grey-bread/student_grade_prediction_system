@@ -218,8 +218,21 @@ def ug_calculus_by_factors_bucket():
         buckets = int(request.args.get('buckets', 5))
         buckets = min(max(buckets, 3), 10)
 
-        # 使用更直观的百分比分位标签，替代 Q1/Q2…：如 0%-20%、20%-40% …
-        labels = [f"{int((i-1)*100/buckets)}%-{int(i*100/buckets)}%" for i in range(1, buckets+1)]
+        # 使用更直观的“低→高”分档标签，替代百分比分位或 Q1/Q2…
+        def friendly_bucket_labels(n: int):
+            presets = {
+                3: ['低', '中', '高'],
+                4: ['低', '中低', '中高', '高'],
+                5: ['低', '较低', '中', '较高', '高'],
+                6: ['极低', '较低', '中低', '中高', '较高', '极高'],
+                7: ['极低', '很低', '较低', '中', '较高', '很高', '极高']
+            }
+            if n in presets:
+                return presets[n]
+            # 通用回退：第1档…第N档
+            return [f"第{i}档" for i in range(1, n+1)]
+
+        labels = friendly_bucket_labels(buckets)
         series = []
 
         for col in factors:
@@ -886,6 +899,199 @@ def student_feedback():
         traceback.print_exc(file=sys.stdout)
         return jsonify({'status': 'error', 'message': f'生成学生反馈失败: {str(e)}'}), 500
 
+
+# === 持久化学生反馈：保存/读取 ===
+def _ensure_feedback_table():
+    try:
+        from database import execute_query
+        execute_query('''
+            CREATE TABLE IF NOT EXISTS student_feedbacks (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                student_id INT NOT NULL,
+                content LONGTEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_student (student_id)
+            )
+        ''')
+    except Exception:
+        pass
+
+def _ensure_feedback_history_table():
+    try:
+        from database import execute_query
+        execute_query('''
+            CREATE TABLE IF NOT EXISTS student_feedback_history (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                student_id INT NOT NULL,
+                entry_type VARCHAR(32) NOT NULL DEFAULT 'feedback',
+                summary VARCHAR(512) NULL,
+                content LONGTEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_student_time (student_id, created_at)
+            )
+        ''')
+    except Exception:
+        pass
+
+@analysis_bp.route('/student-feedback/save', methods=['POST'])
+def save_student_feedback():
+    """保存前端生成的学生反馈内容（JSON）。
+    入参 JSON：{ student_id: int, detail?: {...}, trendFeedback:[], weaknessFeedback:[], suggestionFeedback:[] }
+    语义：按 student_id 覆盖保存一份最新反馈供教师面板读取。
+    """
+    try:
+        _ensure_feedback_table()
+        data = request.get_json(force=True)
+        student_id = data.get('student_id')
+        if not student_id:
+            return jsonify({'status': 'error', 'message': '缺少参数: student_id'}), 400
+        import json
+        content = json.dumps(data, ensure_ascii=False)
+        from database import execute_query
+        # UPSERT（兼容无 ON DUPLICATE 的引擎时分两步）
+        try:
+            execute_query(
+                """
+                INSERT INTO student_feedbacks (student_id, content)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE content = VALUES(content), updated_at = CURRENT_TIMESTAMP
+                """,
+                (student_id, content)
+            )
+        except Exception:
+            # 回退：尝试先删除再插入
+            try:
+                execute_query("DELETE FROM student_feedbacks WHERE student_id=%s", (student_id,))
+            except Exception:
+                pass
+            execute_query("INSERT INTO student_feedbacks (student_id, content) VALUES (%s, %s)", (student_id, content))
+        # 追加一条历史（不影响主流程，失败忽略）
+        try:
+            _ensure_feedback_history_table()
+            from database import execute_query as _exec2
+            # 构造简要 summary（取2条薄弱点与2条建议）
+            try:
+                _data = json.loads(content)
+            except Exception:
+                _data = {}
+            weak = []
+            sugg = []
+            if isinstance(_data, dict):
+                w = _data.get('weaknessFeedback') or _data.get('weaknesses') or []
+                s = _data.get('suggestionFeedback') or _data.get('suggestions') or []
+                if isinstance(w, list): weak = [str(x) for x in w if x][:2]
+                if isinstance(s, list): sugg = [str(x) for x in s if x][:2]
+            summary = ('；'.join(weak + sugg))[:480] if (weak or sugg) else None
+            _exec2(
+                """
+                INSERT INTO student_feedback_history (student_id, entry_type, summary, content)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (student_id, 'feedback', summary, content)
+            )
+        except Exception:
+            pass
+        return jsonify({'status': 'success', 'message': '反馈已保存'})
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': f'保存反馈失败: {str(e)}'}), 500
+
+@analysis_bp.route('/student-feedback/saved', methods=['GET'])
+def get_saved_student_feedback():
+    """读取最近一次保存的学生反馈。"""
+    try:
+        _ensure_feedback_table()
+        student_id = request.args.get('student_id')
+        if not student_id:
+            return jsonify({'status': 'error', 'message': '缺少参数: student_id'}), 400
+        from database import fetch_one
+        row = fetch_one("SELECT content FROM student_feedbacks WHERE student_id=%s", (student_id,))
+        if not row:
+            return jsonify({'status': 'success', 'data': None})
+        import json
+        try:
+            content = json.loads(row.get('content') or '{}')
+        except Exception:
+            content = {'raw': row.get('content')}
+        return jsonify({'status': 'success', 'data': content})
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': f'读取保存反馈失败: {str(e)}'}), 500
+
+@analysis_bp.route('/student-feedback/history/add', methods=['POST'])
+def add_student_feedback_history():
+    """追加一条学生反馈历史或学习进展。
+    入参 JSON：{ student_id:int, entry_type?:'feedback'|'progress', summary?:str, payload?:object }
+    content = JSON 序列化后的 payload；summary 用于教师面板时间轴简要展示。
+    """
+    try:
+        _ensure_feedback_history_table()
+        data = request.get_json(force=True) or {}
+        student_id = data.get('student_id')
+        if not student_id:
+            return jsonify({'status': 'error', 'message': '缺少参数: student_id'}), 400
+        entry_type = (data.get('entry_type') or 'progress').strip().lower()
+        import json
+        payload = data.get('payload') if isinstance(data.get('payload'), (dict, list)) else {'text': data.get('text')}
+        content = json.dumps(payload or {}, ensure_ascii=False)
+        summary = data.get('summary')
+        from database import execute_query
+        execute_query(
+            """
+            INSERT INTO student_feedback_history (student_id, entry_type, summary, content)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (student_id, entry_type, summary, content)
+        )
+        return jsonify({'status': 'success', 'message': '历史已追加'})
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': f'追加历史失败: {str(e)}'}), 500
+
+@analysis_bp.route('/student-feedback/history', methods=['GET'])
+def list_student_feedback_history():
+    """获取学生反馈历史列表。
+    入参：student_id（必填），limit（可选，默认 50）
+    返回：按时间倒序的历史项，包含 id、created_at、entry_type、summary、content(JSON)
+    """
+    try:
+        _ensure_feedback_history_table()
+        student_id = request.args.get('student_id')
+        if not student_id:
+            return jsonify({'status': 'error', 'message': '缺少参数: student_id'}), 400
+        limit = int(request.args.get('limit', 50))
+        from database import fetch_all
+        rows = fetch_all(
+            """
+            SELECT id, student_id, entry_type, summary, content, created_at
+            FROM student_feedback_history
+            WHERE student_id=%s
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (student_id, limit)
+        ) or []
+        import json
+        out = []
+        for r in rows:
+            try:
+                payload = json.loads(r.get('content') or '{}')
+            except Exception:
+                payload = {'raw': r.get('content')}
+            out.append({
+                'id': r.get('id'),
+                'student_id': r.get('student_id'),
+                'entry_type': r.get('entry_type') or 'feedback',
+                'summary': r.get('summary'),
+                'payload': payload,
+                'created_at': str(r.get('created_at'))
+            })
+        return jsonify({'status': 'success', 'data': out})
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': f'查询历史失败: {str(e)}'}), 500
+
 @analysis_bp.route('/tables', methods=['GET'])
 def list_tables():
     """获取数据库中的所有表名"""
@@ -954,18 +1160,24 @@ def list_columns():
                 except Exception:
                     continue
 
-            # 目标列推荐（中文优先、再英文）
-            zh_keys = ('总成绩','总分','分数','成绩','期末','期中','平时','总评')
-            en_keys = ('gpa','grade','score','final','total')
-            # 中文关键词优先
-            for c in columns:
-                if any(k in str(c) for k in zh_keys):
-                    recommended.append(c)
-            # 英文关键词其次
-            for c in columns:
-                low = str(c).lower()
-                if any(k in low for k in en_keys) and c not in recommended:
-                    recommended.append(c)
+            # 目标列推荐：若为大学成绩表或包含特定列，则限定在四个列中选择
+            preferred_targets = ['first_calculus_score','second_calculus_score','third_calculus_score','calculus_avg_score']
+            preferred_in_table = [c for c in preferred_targets if c in columns]
+            if preferred_in_table:
+                recommended = preferred_in_table
+            else:
+                # 通用策略（中文优先、再英文）
+                zh_keys = ('总成绩','总分','分数','成绩','期末','期中','平时','总评')
+                en_keys = ('gpa','grade','score','final','total')
+                # 中文关键词优先
+                for c in columns:
+                    if any(k in str(c) for k in zh_keys):
+                        recommended.append(c)
+                # 英文关键词其次
+                for c in columns:
+                    low = str(c).lower()
+                    if any(k in low for k in en_keys) and c not in recommended:
+                        recommended.append(c)
             # 若仍为空且有数值列，不强行指定，交由前端显示“自动识别”
         else:
             # 回退：数据库列（无类型信息）
@@ -2308,7 +2520,7 @@ def get_grade_distribution():
 
 @analysis_bp.route('/score-band-distribution', methods=['GET'])
 def get_score_band_distribution():
-    """Return counts by score bands (40-60, 60-80, 80-100) for a numeric score column.
+    """Return counts by score bands for a numeric score column.
     Params: table, column (optional). If column missing, auto-select 'calculus_avg_score' (new) -> 'total_score' -> 'calculus_score' -> any '*score*' column.
     """
     try:
@@ -2332,11 +2544,13 @@ def get_score_band_distribution():
         if not column or column not in df.columns:
             return jsonify({'status': 'success', 'data': [], 'total': 0, 'table': table_name}), 200
         ser = pd.to_numeric(df[column], errors='coerce').dropna()
-        # Define bands
+        # 根据常见教学分段按数据库更新：不及格(<60)、及格(60-70)、中等(70-80)、良好(80-90)、优秀(90-100)
         bands = [
-            ('40-60', (40, 60)),
-            ('60-80', (60, 80)),
-            ('80-100', (80, 100.0000001))  # include 100
+            ('不及格(<60)', (0, 60)),
+            ('及格(60-70)', (60, 70)),
+            ('中等(70-80)', (70, 80)),
+            ('良好(80-90)', (80, 90)),
+            ('优秀(90-100)', (90, 100.0000001))  # include 100
         ]
         data = []
         total = int(len(ser))
@@ -2978,9 +3192,98 @@ def ensure_management_tables():
               updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
             """
-    )
+        )
+        # 采集运行日志（与采集器保持一致，幂等创建）
+        execute_query(
+            """
+            CREATE TABLE IF NOT EXISTS collection_runs (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              source_id INT NOT NULL,
+              table_name VARCHAR(128) NOT NULL,
+              run_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              status VARCHAR(16) NOT NULL,
+              delta_rows INT DEFAULT 0,
+              error TEXT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            """
+        )
     except Exception as e:
         print(f"[数据管理] 初始化管理表失败: {e}")
+
+
+def _get_actual_tables() -> list:
+    try:
+        tables = get_tables() or []
+        management = {
+            'data_sources', 'upload_history', 'collection_tasks', 'data_sync_state',
+            'table_column_mapping', 'collection_runs'
+        }
+        return [t for t in tables if t not in management]
+    except Exception:
+        return []
+
+
+def sync_data_sources_with_db():
+    """将 data_sources 与当前数据库实际表名保持完全同步：
+    - 新增缺失的数据源（active=1，config 仅包含 table）
+    - 删除已不存在的表对应的数据源
+    - 校正名称为“{table} 表”
+    """
+    try:
+        ensure_management_tables()
+        actual = set(_get_actual_tables())
+        rows = fetch_all("SELECT id, name, config FROM data_sources") or []
+        ds_by_table = {}
+        ids_to_delete = []
+        for r in rows:
+            cfg_raw = r.get('config') or '{}'
+            try:
+                cfg = json.loads(cfg_raw) if str(cfg_raw).strip().startswith('{') else {}
+            except Exception:
+                cfg = {}
+            t = cfg.get('table')
+            if t:
+                ds_by_table[t] = r
+            else:
+                # 没有 table 字段的旧记录，删除
+                ids_to_delete.append(r.get('id'))
+
+        # 删除不存在表的数据源
+        for t, r in list(ds_by_table.items()):
+            if t not in actual:
+                try:
+                    execute_query("DELETE FROM data_sources WHERE id=%s", [r.get('id')])
+                except Exception:
+                    pass
+
+        for rid in ids_to_delete:
+            try:
+                execute_query("DELETE FROM data_sources WHERE id=%s", [rid])
+            except Exception:
+                pass
+
+        # 新增缺失的表
+        for t in sorted(actual):
+            if t not in ds_by_table:
+                try:
+                    cfg = { 'table': t }
+                    execute_query(
+                        "INSERT INTO data_sources (name, type, config, active) VALUES (%s,%s,%s,%s)",
+                        [f"{t} 表", '数据库表', json.dumps(cfg, ensure_ascii=False), 1]
+                    )
+                except Exception:
+                    pass
+            else:
+                # 校正名称
+                r = ds_by_table[t]
+                expect_name = f"{t} 表"
+                if (r.get('name') or '') != expect_name:
+                    try:
+                        execute_query("UPDATE data_sources SET name=%s WHERE id=%s", [expect_name, r.get('id')])
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
 
 @analysis_bp.route('/uploads', methods=['GET', 'POST'])
@@ -3278,41 +3581,14 @@ def data_sources_endpoint():
         ensure_management_tables()
 
         if request.method == 'GET':
+            # 每次获取前，自动将数据源与数据库表结构对齐
+            try:
+                sync_data_sources_with_db()
+            except Exception:
+                pass
             rows = fetch_all(
                 "SELECT id, name, type, config, active, last_collection, created_at FROM data_sources ORDER BY id DESC"
             ) or []
-            if not rows:
-                # 不返回临时项：当数据源为空时，基于真实表一次性创建正式数据源记录
-                tables = get_tables() or []
-                management = {'data_sources', 'upload_history', 'collection_tasks', 'data_sync_state', 'table_column_mapping'}
-                created = 0
-                for t in tables:
-                    if t in management:
-                        continue
-                    try:
-                        cfg = { 'table': t }
-                        try:
-                            cols = set(get_columns(t) or [])
-                        except Exception:
-                            cols = set()
-                        # 常见增量列优先 updated_at 其后 id
-                        if 'updated_at' in cols:
-                            cfg['updated_at_column'] = 'updated_at'
-                        elif 'id' in cols:
-                            cfg['key_column'] = 'id'
-                        execute_query(
-                            "INSERT INTO data_sources (name, type, config, active) VALUES (%s,%s,%s,%s)",
-                            [f"{t} 表", '数据库表', json.dumps(cfg, ensure_ascii=False), 1]
-                        )
-                        created += 1
-                    except Exception as _e:
-                        # 单表失败不影响整体
-                        pass
-                # 重新查询并返回
-                rows = fetch_all(
-                    "SELECT id, name, type, config, active, last_collection, created_at FROM data_sources ORDER BY id DESC"
-                ) or []
-
             data = []
             for r in rows:
                 data.append({
@@ -3526,6 +3802,99 @@ def update_collection_task(task_id: int):
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
         return jsonify({'status': 'error', 'message': f'更新任务失败: {str(e)}'}), 500
+
+
+@analysis_bp.route('/collection-runs', methods=['GET'])
+def collection_runs_endpoint():
+    """获取采集运行记录。可选 query: source_id, limit (默认20)。"""
+    try:
+        ensure_management_tables()
+        source_id = request.args.get('source_id', type=int)
+        limit = request.args.get('limit', default=20, type=int)
+        limit = max(1, min(200, limit))
+        if source_id:
+            rows = fetch_all(
+                "SELECT id, run_at, status, delta_rows, error FROM collection_runs WHERE source_id=%s ORDER BY run_at DESC, id DESC LIMIT %s",
+                [source_id, limit]
+            ) or []
+        else:
+            rows = fetch_all(
+                "SELECT id, source_id, table_name, run_at, status, delta_rows, error FROM collection_runs ORDER BY run_at DESC, id DESC LIMIT %s",
+                [limit]
+            ) or []
+        data = []
+        for r in rows:
+            data.append({
+                'id': r.get('id'),
+                'sourceId': r.get('source_id'),
+                'table': r.get('table_name'),
+                'runAt': str(r.get('run_at')) if r.get('run_at') else None,
+                'status': r.get('status'),
+                'deltaRows': int(r.get('delta_rows') or 0),
+                'error': r.get('error')
+            })
+        return jsonify({'status': 'success', 'data': data}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': f'获取采集记录失败: {str(e)}'}), 500
+
+
+@analysis_bp.route('/data-sources/sync', methods=['POST'])
+def sync_data_sources():
+    """根据当前数据库表结构校正数据源配置（自动选择 updated_at 或 主键列）。"""
+    try:
+        ensure_management_tables()
+        rows = fetch_all("SELECT id, name, config FROM data_sources") or []
+        updated = []
+        for r in rows:
+            sid = r.get('id')
+            cfg_raw = r.get('config') or '{}'
+            try:
+                cfg = json.loads(cfg_raw) if str(cfg_raw).strip().startswith('{') else {}
+            except Exception:
+                cfg = {}
+            table = cfg.get('table')
+            if not table:
+                continue
+            cols = set(get_columns(table) or [])
+            if not cols:
+                # 表不存在，跳过，仅记录
+                updated.append({'id': sid, 'name': r.get('name'), 'action': 'table_missing'})
+                continue
+            new_cfg = dict(cfg)
+            # 优先按 updated_at；否则 id；否则 student_id；否则移除策略（始终触发）
+            changed = False
+            if 'updated_at' in cols:
+                if new_cfg.get('updated_at_column') != 'updated_at' or new_cfg.get('key_column'):
+                    new_cfg['updated_at_column'] = 'updated_at'
+                    if 'key_column' in new_cfg:
+                        del new_cfg['key_column']
+                    changed = True
+            elif 'id' in cols:
+                if new_cfg.get('key_column') != 'id' or new_cfg.get('updated_at_column'):
+                    new_cfg['key_column'] = 'id'
+                    if 'updated_at_column' in new_cfg:
+                        del new_cfg['updated_at_column']
+                    changed = True
+            elif 'student_id' in cols:
+                if new_cfg.get('key_column') != 'student_id' or new_cfg.get('updated_at_column'):
+                    new_cfg['key_column'] = 'student_id'
+                    if 'updated_at_column' in new_cfg:
+                        del new_cfg['updated_at_column']
+                    changed = True
+            else:
+                # 移除无效列配置
+                if 'key_column' in new_cfg or 'updated_at_column' in new_cfg:
+                    new_cfg.pop('key_column', None)
+                    new_cfg.pop('updated_at_column', None)
+                    changed = True
+            if changed:
+                execute_query("UPDATE data_sources SET config=%s, updated_at=NOW() WHERE id=%s", [json.dumps(new_cfg, ensure_ascii=False), sid])
+                updated.append({'id': sid, 'name': r.get('name'), 'action': 'updated', 'config': new_cfg})
+        return jsonify({'status': 'success', 'updated': updated}), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': f'同步失败: {str(e)}'}), 500
 
 
 def format_file_size_safe(num_bytes: int) -> str:

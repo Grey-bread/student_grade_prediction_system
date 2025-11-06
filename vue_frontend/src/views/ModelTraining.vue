@@ -62,8 +62,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="目标列">
-          <el-select v-model="trainConfig.targetColumn" placeholder="自动识别" style="width: 300px" clearable>
-            <el-option :label="'自动识别'" :value="''" />
+          <el-select v-model="trainConfig.targetColumn" placeholder="请选择（必选）" style="width: 300px" clearable>
             <el-option
               v-for="col in targetColumnOptions"
               :key="col"
@@ -71,7 +70,17 @@
               :value="col"
             />
           </el-select>
+          <template #error>
+            <span v-if="!targetColumnOptions.length" style="color:#F56C6C">当前表未检测到“高数第一次/第二次/第三次/平均”四列，请选择“大学成绩表”或检查表结构。</span>
+          </template>
         </el-form-item>
+        <div v-if="!targetColumnOptions.length" style="margin: -10px 0 10px 120px;">
+          <el-alert type="warning" :closable="false" show-icon title="未找到可选目标列">
+            <template #description>
+              请切换数据表为“university_grades”（大学成绩），或确保存在以下任一列：高数第一次/高数第二次/高数第三次/高数平均。
+            </template>
+          </el-alert>
+        </div>
 
         <el-form-item label="测试集比例">
           <el-slider v-model="trainConfig.testSize" :min="10" :max="40" :step="5" show-stops />
@@ -79,7 +88,7 @@
         </el-form-item>
 
         <el-form-item>
-          <el-button type="primary" @click="startTraining" :loading="training" size="large">
+          <el-button type="primary" @click="startTraining" :disabled="!canStartTrain" :loading="training" size="large">
             <el-icon><VideoPlay /></el-icon>
             开始训练与评估
           </el-button>
@@ -171,17 +180,32 @@
       <el-divider />
 
       <h4>📊 可视化结果</h4>
-      <el-row :gutter="20">
+      <el-row :gutter="20" style="margin-top: 12px;">
         <el-col :span="12">
           <div class="viz-container">
-            <h5>预测值对比实际值</h5>
-            <div class="chart-container small" ref="trainPredScatter"></div>
+            <h5>残差直方图（预测-实际）</h5>
+            <div class="chart-container small" ref="trainResidual"></div>
           </div>
         </el-col>
         <el-col :span="12">
           <div class="viz-container">
-            <h5>特征重要性分布</h5>
-            <div class="chart-container small" ref="trainFiBar"></div>
+            <h5>校准曲线（分位分箱）</h5>
+            <div class="chart-container small" ref="trainCalibration"></div>
+          </div>
+        </el-col>
+      </el-row>
+
+      <el-row :gutter="20" style="margin-top: 12px;">
+        <el-col :span="12">
+          <div class="viz-container">
+            <h5>分数段热力图（预测×实际）</h5>
+            <div class="chart-container small" ref="trainHeatmap"></div>
+          </div>
+        </el-col>
+        <el-col :span="12">
+          <div class="viz-container">
+            <h5>按年级的MAE</h5>
+            <div class="chart-container small" ref="trainErrorGrade"></div>
           </div>
         </el-col>
       </el-row>
@@ -238,15 +262,37 @@ export default {
       },
       charts: {
         predScatter: null,
-        fiBar: null
+        fiBar: null,
+        residual: null,
+        calibration: null,
+        heatmap: null,
+        errorGrade: null
       }
     }
   },
   mounted() {
     this.loadDataStats()
     this.loadTables()
+    // 监听窗口尺寸变化，避免图表初始空白或拉伸异常
+    window.addEventListener('resize', this.handleResize)
+  },
+  beforeUnmount() {
+    window.removeEventListener('resize', this.handleResize)
+    try {
+      Object.values(this.charts).forEach(ch => ch && ch.dispose && ch.dispose())
+    } catch (e) {}
+  },
+  watch: {
+    'trainConfig.table'(val) {
+      // 表切换时刷新可选目标列并清空已选
+      this.trainConfig.targetColumn = ''
+      this.fetchTargetColumns()
+    }
   },
   methods: {
+    handleResize() {
+      try { Object.values(this.charts).forEach(ch => ch && ch.resize && ch.resize()) } catch (e) {}
+    },
     async fetchTargetColumns() {
       try {
         if (!this.trainConfig.table) {
@@ -259,6 +305,12 @@ export default {
             columns: res.data.columns || [],
             numeric_columns: res.data.numeric_columns || [],
             recommended_targets: res.data.recommended_targets || []
+          }
+          // 将目标列限定为四个高数相关字段（若存在）
+          const allowed = ['first_calculus_score','second_calculus_score','third_calculus_score','calculus_avg_score']
+          const exists = allowed.filter(c => this.targetOptions.columns.includes(c))
+          if (exists.length) {
+            this.targetOptions.recommended_targets = exists
           }
           // 若当前选择的目标列不在候选中，则置空以使用自动识别
           if (this.trainConfig.targetColumn && !this.targetOptions.columns.includes(this.trainConfig.targetColumn)) {
@@ -297,6 +349,8 @@ export default {
               ? 'university_grades'
               : (this.availableTables[0] || '')
           }
+          // 载入表后刷新可选目标列
+          await this.fetchTargetColumns()
         }
       } catch (err) {
         console.error('加载表列表失败:', err)
@@ -359,13 +413,17 @@ export default {
           this.training = false
           return
         }
+        if (!this.trainConfig.targetColumn) {
+          clearInterval(progressInterval)
+          this.$message.error('请选择目标列（必选）')
+          this.training = false
+          return
+        }
 
         const payload = {
           table: this.trainConfig.table,
-          testSize: this.trainConfig.testSize / 100
-        }
-        if (this.trainConfig.targetColumn) {
-          payload.targetColumn = this.trainConfig.targetColumn
+          testSize: this.trainConfig.testSize / 100,
+          targetColumn: this.trainConfig.targetColumn
         }
 
         const response = await axios.post('/api/training/predict-table', payload)
@@ -376,7 +434,14 @@ export default {
           this.progress = 100
           this.progressText = '训练完成！'
           this.trainResult = response.data.data || {}
-          this.renderTrainingCharts()
+          // 确保 DOM 已渲染后再初始化图表
+          this.$nextTick(() => {
+            this.renderTrainingCharts()
+            // 渲染后再触发一次 resize，避免首屏尺寸计算不准
+            setTimeout(() => {
+              try { Object.values(this.charts).forEach(ch => ch && ch.resize && ch.resize()) } catch (e) {}
+            }, 50)
+          })
           this.$message.success('模型训练完成！')
         } else {
           this.$message.error(response.data.message || '训练失败')
@@ -431,6 +496,119 @@ export default {
           this.charts.fiBar.setOption(option2, true)
         }
       } catch (e) { console.warn('渲染特征重要性失败', e) }
+
+      // 残差直方图
+      try {
+        const c = this.$refs.trainResidual
+        const vis = this.trainResult.visualizations || {}
+        const residuals = Array.isArray(vis.residuals) ? vis.residuals : []
+        if (c) {
+          if (!this.charts.residual) this.charts.residual = echarts.init(c)
+          if (residuals.length) {
+            const min = Math.min(...residuals), max = Math.max(...residuals)
+            const bins = 20
+            const step = (max - min) / bins || 1
+            const edges = Array.from({length: bins+1}, (_,i)=> min + i*step)
+            const counts = new Array(bins).fill(0)
+            for (const v of residuals) {
+              let idx = Math.floor((v - min) / step)
+              if (idx < 0) idx = 0
+              if (idx >= bins) idx = bins-1
+              counts[idx]++
+            }
+            const labels = counts.map((_,i)=> `${(edges[i]).toFixed(1)}~${(edges[i+1]).toFixed(1)}`)
+            const option = {
+              tooltip: { trigger: 'axis' },
+              xAxis: { type: 'category', data: labels, axisLabel: { rotate: 40 } },
+              yAxis: { type: 'value', name: '频数' },
+              series: [{ type: 'bar', data: counts, itemStyle: { color: '#909399' } }]
+            }
+            this.charts.residual.setOption(option, true)
+          } else {
+            this.charts.residual.setOption({
+              title: { text: '暂无数据', left: 'center', top: 'middle', textStyle: { color: '#909399' } },
+              xAxis: { show: false }, yAxis: { show: false }, series: []
+            }, true)
+          }
+        }
+      } catch (e) { console.warn('渲染残差直方图失败', e) }
+
+      // 校准曲线
+      try {
+        const c = this.$refs.trainCalibration
+        const calib = (this.trainResult.visualizations && this.trainResult.visualizations.calibration) || null
+        if (c) {
+          if (!this.charts.calibration) this.charts.calibration = echarts.init(c)
+          if (calib && Array.isArray(calib.centers) && calib.centers.length) {
+            const option = {
+              tooltip: { trigger: 'axis' },
+              legend: { top: 10, data: ['平均预测','平均实际'] },
+              xAxis: { type: 'value', name: '预测分箱中心' },
+              yAxis: { type: 'value', name: '分数' },
+              series: [
+                { name: '平均预测', type: 'line', data: (calib.centers||[]).map((x,i)=> [x, calib.avg_pred[i]]) },
+                { name: '平均实际', type: 'line', data: (calib.centers||[]).map((x,i)=> [x, calib.avg_actual[i]]) }
+              ]
+            }
+            this.charts.calibration.setOption(option, true)
+          } else {
+            this.charts.calibration.setOption({
+              title: { text: '暂无数据', left: 'center', top: 'middle', textStyle: { color: '#909399' } },
+              xAxis: {}, yAxis: {}, series: []
+            }, true)
+          }
+        }
+      } catch (e) { console.warn('渲染校准曲线失败', e) }
+
+      // 分数段热力图
+      try {
+        const c = this.$refs.trainHeatmap
+        const bh = (this.trainResult.visualizations && this.trainResult.visualizations.band_heatmap) || null
+        if (c) {
+          if (!this.charts.heatmap) this.charts.heatmap = echarts.init(c)
+          if (bh && Array.isArray(bh.labels) && Array.isArray(bh.values) && bh.values.length) {
+            const option = {
+              tooltip: { position: 'top', formatter: (p)=> `${bh.labels[p.data[0]]} × ${bh.labels[p.data[1]]}: ${p.data[2]}` },
+              grid: { left: '10%', right: '8%', top: '10%', bottom: '12%' },
+              xAxis: { type: 'category', data: bh.labels, name: '预测段' },
+              yAxis: { type: 'category', data: bh.labels, name: '实际段' },
+              visualMap: { min: 0, max: Math.max(1, ...bh.values.map(v=>v[2])), orient: 'horizontal', left: 'center', bottom: 0 },
+              series: [{ type: 'heatmap', data: bh.values, label: { show: true } }]
+            }
+            this.charts.heatmap.setOption(option, true)
+          } else {
+            this.charts.heatmap.setOption({
+              title: { text: '暂无数据', left: 'center', top: 'middle', textStyle: { color: '#909399' } },
+              xAxis: {}, yAxis: {}, series: []
+            }, true)
+          }
+        }
+      } catch (e) { console.warn('渲染热力图失败', e) }
+
+      // 按年级MAE
+      try {
+        const c = this.$refs.trainErrorGrade
+        const eg = (this.trainResult.visualizations && this.trainResult.visualizations.error_by_grade) || []
+        if (c) {
+          if (!this.charts.errorGrade) this.charts.errorGrade = echarts.init(c)
+          if (eg.length) {
+            const labels = eg.map(x=> x.name)
+            const values = eg.map(x=> Number(x.mae || 0))
+            const option = {
+              tooltip: { trigger: 'axis' },
+              xAxis: { type: 'category', data: labels },
+              yAxis: { type: 'value', name: 'MAE' },
+              series: [{ type: 'bar', data: values, itemStyle: { color: '#E6A23C' } }]
+            }
+            this.charts.errorGrade.setOption(option, true)
+          } else {
+            this.charts.errorGrade.setOption({
+              title: { text: '暂无数据', left: 'center', top: 'middle', textStyle: { color: '#909399' } },
+              xAxis: {}, yAxis: {}, series: []
+            }, true)
+          }
+        }
+      } catch (e) { console.warn('渲染按年级MAE失败', e) }
     },
 
     getTableLabel(table) {
@@ -464,22 +642,25 @@ export default {
         total_score: '总成绩', final_score: '期末成绩', midterm_score: '期中成绩', usual_score: '平时成绩',
         score: '分数', ranking: '排名',
         calculus_score: '高等数学成绩', homework_score: '作业分数',
+        first_calculus_score: '高数第一次',
+        second_calculus_score: '高数第二次',
+        third_calculus_score: '高数第三次',
+        calculus_avg_score: '高数平均',
         study_hours: '学习时长', attendance_count: '出勤次数', practice_count: '刷题数'
       }
       return map[col] || col
     }
   },
   computed: {
+    canStartTrain() {
+      return Boolean(this.trainConfig.table) && Boolean(this.trainConfig.targetColumn)
+    },
     targetColumnOptions() {
-      // 推荐优先，其次数值列，去重
-      const rec = Array.isArray(this.targetOptions.recommended_targets) ? this.targetOptions.recommended_targets : []
-      const nums = Array.isArray(this.targetOptions.numeric_columns) ? this.targetOptions.numeric_columns : []
-      const all = [...rec, ...nums]
-      const seen = new Set()
-      return all.filter(c => {
-        if (seen.has(c)) return false
-        seen.add(c); return true
-      })
+      // 仅允许四个高数相关目标列（若存在），否则回退为自动识别
+      const allowed = ['first_calculus_score','second_calculus_score','third_calculus_score','calculus_avg_score']
+      const cols = Array.isArray(this.targetOptions.columns) ? this.targetOptions.columns : []
+      const exists = allowed.filter(c => cols.includes(c))
+      return exists
     },
     processedModelResults() {
       const raw = this.trainResult && this.trainResult.model_results
@@ -684,6 +865,15 @@ export default {
   width: 100%;
   border-radius: 8px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+}
+
+/* ECharts 容器尺寸（必需） */
+.chart-container {
+  width: 100%;
+  height: 360px;
+}
+.chart-container.small {
+  height: 300px;
 }
 
 /* 训练信息 */

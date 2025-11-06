@@ -178,7 +178,7 @@ def predict_table():
         if df_raw is None or df_raw.empty:
             return jsonify({'status': 'error', 'message': f'表 {table_name} 无可用数据'}), 400
 
-        # 记录目标列缺失的样本，用于后续重点返回
+        # 记录目标列缺失的样本，用于后续重点返回（仅在提供目标列时）
         missing_mask = None
         if target_column and target_column in df_raw.columns:
             missing_mask = df_raw[target_column].isna()
@@ -186,28 +186,25 @@ def predict_table():
         # 预处理（去重/缺失填充/异常值/编码）
         df_proc, encoders = preprocess_df(df_raw)
 
-        # 自动识别目标列（支持中文）
-        if not target_column:
-            en_keys = ('gpa','grade','score','final','total')
-            zh_keys = ('总成绩','总分','分数','成绩','期末','期中','平时','总评')
-            cand = []
-            for c in df_proc.columns:
-                if any(k in str(c) for k in zh_keys):
-                    cand.append(c)
-            for c in df_proc.columns:
-                cl = str(c).lower()
-                if any(k in cl for k in en_keys) and c not in cand:
-                    cand.append(c)
-            if cand:
-                target_column = cand[0]
-            else:
-                nums = df_proc.select_dtypes(include=['int64','float64']).columns.tolist()
-                if not nums:
-                    return jsonify({'status': 'error', 'message': '无法识别目标列，请提供 targetColumn 或在表中包含成绩列（如“总成绩/总分/分数”等）'}), 400
-                target_column = nums[-1]
+        # 限定与校验目标列：必须手动指定；若存在四个高数目标列，则必须从其中选择
+        allowed_targets = ['first_calculus_score', 'second_calculus_score', 'third_calculus_score', 'calculus_avg_score']
+        allowed_in_df = [c for c in allowed_targets if c in df_proc.columns]
 
+        if not target_column:
+            # 不再自动识别，强制前端手动选择
+            if allowed_in_df:
+                return jsonify({'status': 'error', 'message': f'请指定目标列（可选: {", ".join(allowed_in_df)}）'}), 400
+            return jsonify({'status': 'error', 'message': '请指定目标列'}), 400
+        
+        # 指定的目标列必须存在
         if target_column not in df_proc.columns:
             return jsonify({'status': 'error', 'message': f'目标列 {target_column} 不存在于表 {table_name}'}), 400
+        
+        # 若存在允许集合，则强制限定
+        if allowed_in_df and target_column not in allowed_in_df:
+            return jsonify({'status': 'error', 'message': f'目标列必须从 {", ".join(allowed_in_df)} 中选择'}), 400
+
+        # 前置校验已覆盖不存在情况
 
         # 组装训练数据
         X_all = df_proc.drop(columns=[target_column])
@@ -239,13 +236,15 @@ def predict_table():
         pk = get_primary_key_column(table_name)
         preview_rows = []
         try:
-            for i in range(min(preview_limit, len(df_raw))):
+            n = min(preview_limit, len(y_all))  # 使用处理后的样本长度，避免越界
+            for i in range(n):
                 row = {
                     'predicted': float(y_pred_all[i]),
                     'actual': float(y_all.iloc[i]) if not pd.isna(y_all.iloc[i]) else None
                 }
-                if pk in df_raw.columns:
-                    row[pk] = df_raw.iloc[i][pk]
+                # 优先从预处理后的数据中取主键，保证长度一致
+                if pk and pk in df_proc.columns:
+                    row[pk] = df_proc.iloc[i][pk]
                 preview_rows.append(row)
         except Exception:
             pass
@@ -303,18 +302,121 @@ def predict_table():
                 for k in list(row.keys()):
                     row[k] = to_py(row[k])
 
+        # ===== 可视化派生数据 =====
+        try:
+            actual_list = [float(v) for v in y_all.tolist()]
+            predicted_list = [float(v) for v in y_pred_all.tolist()]
+            # 残差（预测-实际）
+            residuals = [float(p - a) for p, a in zip(predicted_list, actual_list)]
+
+            # 校准曲线：按预测分位数分箱
+            import numpy as np
+            try:
+                q = np.quantile(predicted_list, np.linspace(0, 1, 11))
+                # 去重以防所有预测值相同
+                q = np.unique(q)
+                if len(q) < 2:
+                    q = np.array([min(predicted_list)-1, max(predicted_list)+1])
+                bin_idx = np.digitize(predicted_list, q[1:-1], right=False)
+                bins = max(bin_idx)+1 if len(predicted_list)>0 else 0
+                avg_pred, avg_actual, centers = [], [], []
+                for b in range(bins):
+                    idxs = [i for i, bi in enumerate(bin_idx) if bi == b]
+                    if not idxs:
+                        avg_pred.append(None); avg_actual.append(None); centers.append(None)
+                    else:
+                        ap = float(np.mean([predicted_list[i] for i in idxs]))
+                        aa = float(np.mean([actual_list[i] for i in idxs]))
+                        avg_pred.append(ap); avg_actual.append(aa)
+                        lo = q[b]; hi = q[b+1] if b+1 < len(q) else q[-1]
+                        centers.append(float((lo+hi)/2))
+                calibration = { 'centers': centers, 'avg_pred': avg_pred, 'avg_actual': avg_actual }
+            except Exception:
+                calibration = { 'centers': [], 'avg_pred': [], 'avg_actual': [] }
+
+            # 分数段热力（预测段×实际段）
+            bands = [(0,60),(60,70),(70,80),(80,90),(90,100.0000001)]
+            band_labels = ['<60','60-70','70-80','80-90','90-100']
+            def band_of(v: float):
+                for i,(lo,hi) in enumerate(bands):
+                    if v >= lo and v < hi: return i
+                return None
+            heat_values = []  # [pred_band_idx, actual_band_idx, count]
+            from collections import Counter
+            cnt = Counter()
+            for p, a in zip(predicted_list, actual_list):
+                pb, ab = band_of(p), band_of(a)
+                if pb is not None and ab is not None:
+                    cnt[(pb,ab)] += 1
+            for i in range(len(band_labels)):
+                for j in range(len(band_labels)):
+                    heat_values.append([i, j, int(cnt.get((i,j), 0))])
+
+            # 分年级误差（若联接得到）
+            error_by_grade = []
+            try:
+                # 使用预处理后的 student_id，保证长度与 actual/predicted 一致
+                if 'student_id' in df_proc.columns:
+                    st = get_table_data('students')
+                    if st is not None and not st.empty and 'student_id' in st.columns:
+                        df_join = pd.DataFrame({
+                            'student_id': df_proc['student_id'].values,
+                            'actual': actual_list,
+                            'predicted': predicted_list
+                        })
+                        dfj = df_join.merge(st[['student_id','grade']], on='student_id', how='left')
+                        if 'grade' in dfj.columns:
+                            # 使用聚合避免 groupby.apply 的行为变化警告
+                            dfj2 = dfj.copy()
+                            dfj2['abs_err'] = (dfj2['predicted'] - dfj2['actual']).abs()
+                            grp = dfj2.groupby('grade', dropna=False).agg(
+                                mae=('abs_err', 'mean'),
+                                count=('abs_err', 'size')
+                            ).reset_index()
+                            error_by_grade = [
+                                {'name': str(r['grade']), 'mae': float(r['mae']), 'count': int(r['count'])}
+                                for _, r in grp.iterrows()
+                            ]
+            except Exception:
+                error_by_grade = []
+
+            # 最大误差样本（Top10）
+            top_abs_errors = []
+            try:
+                diffs = [abs(p-a) for p,a in zip(predicted_list, actual_list)]
+                idx_sorted = np.argsort(diffs)[::-1][:10].tolist()
+                for i in idx_sorted:
+                    rec = {'predicted': predicted_list[i], 'actual': actual_list[i], 'abs_error': float(diffs[i])}
+                    if pk and pk in df_proc.columns:
+                        rec[pk] = to_py(df_proc.iloc[i][pk])
+                    top_abs_errors.append(rec)
+            except Exception:
+                pass
+
+            visualizations = {
+                'residuals': residuals,
+                'calibration': calibration,
+                'band_heatmap': { 'labels': band_labels, 'values': heat_values },
+                'error_by_grade': error_by_grade,
+                'top_abs_errors': top_abs_errors
+            }
+        except Exception:
+            visualizations = None
+
         return jsonify({
             'status': 'success',
             'message': '训练与预测完成',
             'data': {
                 'table': table_name,
                 'target_column': target_column,
+                'training_samples': int(len(y_all)),
                 'metrics': {k: to_py(v) for k, v in metrics.items()},
                 'model_results': {k: {kk: to_py(vv) for kk, vv in vv.items()} for k, vv in model_results.items()},
                 'best_params': {k: to_py(v) for k, v in best_params.items()} if isinstance(best_params, dict) else best_params,
                 'feature_importance': fi_records,
                 'preview': preview_rows,
-                'predicted_missing': predicted_missing
+                'predicted_missing': predicted_missing,
+                'visualizations': visualizations
             }
         }), 200
 
