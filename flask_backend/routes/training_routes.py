@@ -632,6 +632,8 @@ def get_training_data_stats():
                     # UG 为单科数据，无课程列；置为 None（前端会显示 0）或可置为 1 表示单课程
                     'total_courses': None,
                     'avg_score': float(df['calculus_avg_score'].dropna().mean()) if df['calculus_avg_score'].notna().any() else None,
+                    # 为前端提供明确的字段名，避免歧义
+                    'calculus_avg_score': float(df['calculus_avg_score'].dropna().mean()) if df['calculus_avg_score'].notna().any() else None,
                     'min_score': float(df['calculus_avg_score'].dropna().min()) if df['calculus_avg_score'].notna().any() else None,
                     'max_score': float(df['calculus_avg_score'].dropna().max()) if df['calculus_avg_score'].notna().any() else None,
                 }
@@ -721,6 +723,8 @@ def get_training_data_stats():
 
         if isinstance(overall, dict):
             overall['total_students_all'] = total_students_all
+            # 在旧表回退场景下，补充 calculus_avg_score 字段为 None，便于前端统一处理
+            overall.setdefault('calculus_avg_score', None)
 
         return jsonify({'status': 'success', 'data': {'overall': overall, 'by_semester': semester_stats}}), 200
 

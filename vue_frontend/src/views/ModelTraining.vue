@@ -33,8 +33,9 @@
         </el-col>
         <el-col :span="6">
           <div class="stat-item">
-            <div class="stat-value">{{ (dataStats.overall.avg_score || 0).toFixed(2) }}</div>
-            <div class="stat-label">平均分</div>
+            <!-- 优先显示高数平均分字段 calculus_avg_score，若后端仅提供 avg_score 则回退 -->
+            <div class="stat-value">{{ ((dataStats.overall.calculus_avg_score ?? dataStats.overall.avg_score) || 0).toFixed(2) }}</div>
+            <div class="stat-label">高数平均分</div>
           </div>
         </el-col>
       </el-row>
@@ -364,23 +365,6 @@ export default {
           if (!this.trainConfig.table) {
             if (this.availableTables.includes('university_grades')) this.trainConfig.table = 'university_grades'
             else if (this.availableTables.length) this.trainConfig.table = this.availableTables[0]
-          }
-          await this.fetchTargetColumns()
-        }
-      } catch (err) {
-        console.error('加载表列表失败:', err)
-      }
-    },
-    async loadTables() {
-      try {
-        const res = await axios.get('/api/analysis/tables')
-        if (res.data?.status === 'success') {
-          const all = res.data.tables || []
-          this.availableTables = all.filter(t => ['university_grades','students'].includes(t))
-          if (!this.trainConfig.table) {
-            this.trainConfig.table = this.availableTables.includes('university_grades')
-              ? 'university_grades'
-              : (this.availableTables[0] || '')
           }
           // 载入表后刷新可选目标列
           await this.fetchTargetColumns()

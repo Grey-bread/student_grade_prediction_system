@@ -2,6 +2,7 @@ import csv
 import os
 import random
 from typing import List, Dict, Tuple, Optional
+import argparse
 
 # Deterministic seed for reproducibility
 random.seed(20251105)
@@ -30,6 +31,7 @@ FIELDNAMES = [
 ]
 
 # Missingness probabilities by field (independent per field)
+# 默认不产生缺失，可通过命令行参数 --allow-missing 开启
 MISS_PROB = {
     'first_calculus_score': 0.06,
     'second_calculus_score': 0.10,
@@ -40,8 +42,13 @@ MISS_PROB = {
     'practice_count': 0.06,
 }
 
+# 控制是否允许按 MISS_PROB 制造缺失
+ALLOW_MISSING = False
+
 
 def maybe_missing(value, field: str):
+    if not ALLOW_MISSING:
+        return value
     p = MISS_PROB.get(field, 0.0)
     if random.random() < p:
         return ''  # write as empty cell for CSV
@@ -66,7 +73,7 @@ def load_students() -> List[Dict[str, str]]:
 def synthesize_row(student: Dict[str, str]) -> Dict[str, Optional[str]]:
     # Base features
     # 学习时长: 正态分布(均值 16 小时/周, 标准差 6), 限制在 [2, 40]
-    study_hours = clip(random.gauss(16, 6), 2, 40)
+    study_hours = clip(random.gauss(16, 6), 2, 50)
 
     # 出勤次数: 假设学期 100 次课，正态分布(均值 88, 标准差 10)，限制 [50, 100]
     attendance = int(round(clip(random.gauss(88, 10), 50, 100)))
@@ -75,7 +82,7 @@ def synthesize_row(student: Dict[str, str]) -> Dict[str, Optional[str]]:
     practice_cnt = int(round(clip(random.lognormvariate(3.2, 0.6), 0, 300)))
 
     # 作业分数: 覆盖 40-100，分布更均匀，叠加噪声
-    homework = clip(40 + 60 * random.random() + random.gauss(0, 6), 40, 100)
+    homework = clip(40 + 60 * random.random() + random.gauss(0, 6), 30, 100)
 
     # 高等数学成绩: 与学习时长、出勤、作业、刷题有关，加入噪声（加大波动）
     base_math = (
@@ -126,7 +133,10 @@ def synthesize_row(student: Dict[str, str]) -> Dict[str, Optional[str]]:
     }
 
 
-def main():
+def main(allow_missing: bool = False):
+    global ALLOW_MISSING
+    ALLOW_MISSING = bool(allow_missing)
+
     students = load_students()
 
     # Only take 600 if there are more; if fewer, generate for available.
@@ -147,4 +157,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Generate synthetic university grades dataset')
+    parser.add_argument('--allow-missing', action='store_true', help='If set, generate missing values according to probabilities')
+    args = parser.parse_args()
+    main(allow_missing=args.allow_missing)

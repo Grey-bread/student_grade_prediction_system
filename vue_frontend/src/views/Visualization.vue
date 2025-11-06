@@ -283,15 +283,19 @@
                 style="width: 100%"
               />
             </template>
-            <template v-else-if="isScoreColumn(column.prop)">
+            <!-- UG 平均分为自动计算，禁止手填 -->
+            <template v-else-if="column.prop === 'calculus_avg_score'">
               <el-input-number
-                v-model="formData[column.prop]"
+                v-model="formData.calculus_avg_score"
                 :min="0"
                 :max="100"
-                :precision="1"
+                :precision="2"
                 style="width: 100%"
+                :disabled="true"
+                placeholder="由三次成绩自动计算"
               />
             </template>
+            <!-- 先渲染下拉选择（如年级/班级等），避免被数值输入覆盖 -->
             <template v-else-if="isSelectColumn(column.prop)">
               <el-select v-model="formData[column.prop]" placeholder="请选择" style="width: 100%">
                 <el-option
@@ -301,6 +305,16 @@
                   :value="option"
                 />
               </el-select>
+            </template>
+            <template v-else-if="isScoreColumn(column.prop)">
+              <el-input-number
+                v-model="formData[column.prop]"
+                :min="0"
+                :max="100"
+                :precision="1"
+                style="width: 100%"
+                @change="onScoreChanged(column.prop)"
+              />
             </template>
             <template v-else>
               <el-input
@@ -390,6 +404,7 @@ export default {
           students: '学生信息表',
           university_grades: '大学成绩表'
         },
+  distinctOptions: {},
         // 表结构配置
         tableConfigs: {
           students: {
@@ -453,7 +468,6 @@ export default {
           university_grades: {
             columns: [
               { prop: 'student_id', label: '学生ID', type: 'id' },
-              { prop: 'student_no', label: '学号', type: 'text' },
               { prop: 'first_calculus_score', label: '高数第一次', type: 'score' },
               { prop: 'second_calculus_score', label: '高数第二次', type: 'score' },
               { prop: 'third_calculus_score', label: '高数第三次', type: 'score' },
@@ -484,12 +498,11 @@ export default {
     
     tableFilteredData() {
       // 确保 tableData 是数组
-      const tableData = Array.isArray(this.tableConfig.tableData) 
-        ? this.tableConfig.tableData 
+      const tableData = Array.isArray(this.tableConfig.tableData)
+        ? this.tableConfig.tableData
         : []
       
       let result = [...tableData]
-      
       // 普通搜索过滤 - 只搜索学号和姓名
       if (this.tableConfig.searchQuery) {
         const query = this.tableConfig.searchQuery.toLowerCase()
@@ -508,7 +521,7 @@ export default {
       return result.slice(start, end)
     },
     
-    // 保障 Table 始终获得可迭代数组，避免 Element Plus 内部对数据迭代时报错
+    // 保障 Table 始终获得可迭代数组
     safeTableData() {
       const data = this.tableFilteredData
       return Array.isArray(data) ? data : []
@@ -559,6 +572,43 @@ export default {
   },
 
   methods: {
+    async preloadDistinctOptions(props = []) {
+      try {
+        const table = this.tableConfig.selectedTable
+        if (!table) return
+        const cache = this.tableConfig.distinctOptions || {}
+        for (const p of props) {
+          if (cache[p] && Array.isArray(cache[p]) && cache[p].length) continue
+          const res = await axios.get('/api/analysis/distinct', { params: { table, column: p } })
+          if (res.data?.status === 'success') {
+            cache[p] = Array.isArray(res.data.values) ? res.data.values : []
+          }
+        }
+        this.tableConfig.distinctOptions = { ...cache }
+      } catch (e) {
+        // 忽略错误
+      }
+    },
+    onScoreChanged(prop) {
+      // 仅在 UG 表中处理平均分
+      if (this.tableConfig.selectedTable !== 'university_grades') return
+      const keys = ['first_calculus_score','second_calculus_score','third_calculus_score']
+      if (!keys.includes(prop)) return
+      this.recalcUgAvg()
+    },
+    recalcUgAvg() {
+      if (this.tableConfig.selectedTable !== 'university_grades') return
+      const s1 = Number(this.formData.first_calculus_score)
+      const s2 = Number(this.formData.second_calculus_score)
+      const s3 = Number(this.formData.third_calculus_score)
+      const vals = [s1, s2, s3].filter(v => Number.isFinite(v))
+      if (vals.length >= 1) {
+        const avg = vals.reduce((a,b)=>a+b,0) / vals.length
+        this.formData.calculus_avg_score = Number(avg.toFixed(2))
+      } else {
+        this.formData.calculus_avg_score = undefined
+      }
+    },
     async onStudentIdChange() {
       await this.loadStudentDetail()
       await this.updateDetailChart()
@@ -1197,7 +1247,16 @@ export default {
     },
 
     isScoreColumn(prop) {
-      return prop.includes('score') || (prop.includes('grade') && !prop.includes('grade_id'))
+      // 优先使用列配置类型判断
+      const cols = this.tableConfig.tableConfigs[this.tableConfig.selectedTable]?.columns || []
+      const cfg = cols.find(c => c.prop === prop)
+      if (cfg && cfg.type) {
+        // 仅当标记为 score 或 number 时使用数字输入
+        return cfg.type === 'score' || cfg.type === 'number'
+      }
+      // 回退：根据字段名的启发式，排除年级/班级/等级
+      if (prop === 'grade' || prop === 'class' || prop === 'grade_level') return false
+      return /score/i.test(prop)
     },
 
     isIdColumn(prop) {
@@ -1220,11 +1279,13 @@ export default {
     
 
     // CRUD 相关方法
-    showCreateDialog() {
+    async showCreateDialog() {
       this.dialogMode = 'create'
       this.dialogTitle = `新增${this.getTableLabel(this.tableConfig.selectedTable)}记录`
       this.formData = {}
       this.dialogVisible = true
+      // 预取年级/班级选项，确保为下拉可选
+      await this.preloadDistinctOptions(['grade', 'class'])
       // 若是 UG 表，预加载学生列表，并尝试用上方已选学生ID预选
       if (this.tableConfig.selectedTable === 'university_grades') {
         this.loadStudentOptions().then(() => {
@@ -1235,16 +1296,20 @@ export default {
               this.onSelectStudent(this.selectedStudentId)
             }
           }
+          this.recalcUgAvg()
         })
       }
     },
 
-    showEditDialog(row) {
+    async showEditDialog(row) {
       this.dialogMode = 'edit'
       this.dialogTitle = `编辑${this.getTableLabel(this.tableConfig.selectedTable)}记录`
       this.currentRecord = { ...row }
       this.formData = { ...row }
       this.dialogVisible = true
+      await this.preloadDistinctOptions(['grade', 'class'])
+      // 打开时同步一次平均分
+      this.recalcUgAvg()
     },
 
     async deleteRecord(row) {
@@ -1285,12 +1350,11 @@ export default {
             return
           }
           // 可选：若三次成绩齐全，前端先计算平均分，减少后端计算压力
-          const s1 = Number(this.formData.first_calculus_score)
-          const s2 = Number(this.formData.second_calculus_score)
-          const s3 = Number(this.formData.third_calculus_score)
-          if (!isNaN(s1) && !isNaN(s2) && !isNaN(s3)) {
-            this.formData.calculus_avg_score = Number(((s1 + s2 + s3) / 3).toFixed(2))
-          }
+          this.recalcUgAvg()
+        }
+        // 编辑UG时也同步一次平均分
+        if (this.dialogMode === 'edit' && this.tableConfig.selectedTable === 'university_grades') {
+          this.recalcUgAvg()
         }
         let response
         if (this.dialogMode === 'create') {
@@ -1391,17 +1455,36 @@ export default {
     },
 
     getColumnOptions(prop) {
-      const options = {
-        'gender': ['男', '女'],
-        'grade': ['高一', '高二', '高三'],
-        'class': ['高一1班', '高一2班', '高一3班', '高一4班', '高二1班', '高二2班', '高二3班', '高二4班', '高三1班', '高三2班', '高三3班', '高三4班'],
-        'status': ['在读', '休学', '毕业', '转学'],
-        'score_level': ['A', 'B', 'C', 'D', 'E'],
-        'semester': ['第一学期', '第二学期'],
-        'academic_year': ['2023-2024', '2024-2025'],
-        'grade_level': ['优秀', '良好', '中等', '及格', '不及格']
+      // 1) 优先使用后端去重接口缓存（与数据库一致）
+      const cache = this.tableConfig.distinctOptions || {}
+      if (Array.isArray(cache[prop]) && cache[prop].length) {
+        return cache[prop]
       }
-      return options[prop] || []
+      // 2) 其次从当前加载的数据中动态提取选项
+      try {
+        const rows = Array.isArray(this.tableConfig.tableData) ? this.tableConfig.tableData : []
+        const vals = Array.from(new Set(rows
+          .map(r => r?.[prop])
+          .filter(v => v !== null && v !== undefined && v !== '')
+          .map(v => String(v))
+        ))
+        if (vals.length) {
+          const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
+          return vals.sort(collator.compare)
+        }
+      } catch (e) { /* ignore */ }
+
+      // 3) 回退仅提供通用项；年级/班级不再硬编码
+      const defaults = {
+        gender: ['男', '女'],
+        status: ['在读', '休学', '毕业', '转学'],
+        score_level: ['A', 'B', 'C', 'D', 'E'],
+        semester: ['第一学期', '第二学期'],
+        academic_year: ['2023-2024', '2024-2025'],
+        grade_level: ['优秀', '良好', '中等', '及格', '不及格']
+      }
+      if (prop === 'grade' || prop === 'class') return []
+      return defaults[prop] || []
     }
   },
 

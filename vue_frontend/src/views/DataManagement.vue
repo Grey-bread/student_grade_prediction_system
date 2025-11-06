@@ -170,6 +170,31 @@
       </el-tab-pane>
     </el-tabs>
 
+    <!-- 上传详情对话框 -->
+    <el-dialog v-model="detailVisible" title="上传详情" width="580px">
+      <div v-if="detailData">
+        <el-descriptions :column="1" border size="small" class="upload-detail-desc">
+          <el-descriptions-item label="文件名">{{ detailData.filename }}</el-descriptions-item>
+          <el-descriptions-item label="状态">
+            <el-tag :type="detailData.status === 'success' ? 'success' : 'danger'">{{ detailData.status }}</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="上传时间">{{ detailData.uploadTime || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="文件大小">{{ detailData.fileSize || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="MIME">{{ detailData.mime_type || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="保存路径"><div class="break-any">{{ detailData.path || '-' }}</div></el-descriptions-item>
+          <el-descriptions-item label="错误信息">
+            <div class="msg-pre" v-if="detailData.message">{{ detailData.message }}</div>
+            <span v-else>-</span>
+          </el-descriptions-item>
+        </el-descriptions>
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="detailVisible = false">关闭</el-button>
+        </span>
+      </template>
+    </el-dialog>
+
     <!-- 添加数据源对话框 -->
     <el-dialog
       v-model="addSourceVisible"
@@ -277,7 +302,9 @@ export default {
     const uploadFiles = ref([])
     
     // 数据，初始为空，将从后端获取
-    const uploadHistory = ref([])
+  const uploadHistory = ref([])
+  const detailVisible = ref(false)
+  const detailData = ref(null)
     const dataSources = ref([])
   const collectionTasks = ref([])
   const runsVisible = ref(false)
@@ -393,8 +420,9 @@ export default {
     
     // 查看文件详情
     const viewFileDetails = (file) => {
-      console.log('查看文件详情:', file)
-      // 实际应用中这里会显示文件详情
+      // 打开详情弹窗，展示后端返回的 message 等信息
+      detailData.value = file
+      detailVisible.value = true
     }
     
     // 显示添加数据源对话框
@@ -698,6 +726,8 @@ export default {
       runsTitle,
       runs,
       viewRuns,
+      detailVisible,
+      detailData,
       
     }
   }
@@ -839,6 +869,9 @@ export default {
   margin: 8px 0 14px;
 }
 
+/* 详情面板内的错误信息保留换行并高亮 */
+.msg-pre { white-space: pre-wrap; word-break: break-all; color: #c0392b }
+
 /* 移除诊断行样式 */
 
 .config-ellipsis {
@@ -882,5 +915,34 @@ export default {
 }
 :deep(.fixed-runs-dialog .el-dialog__footer) {
   border-top: 1px solid #ebeef5;
+}
+/* 详情弹窗内错误信息块样式优化 */
+.msg-pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #c0392b;
+  background: #fff6f6;
+  border: 1px solid #f5c6cb;
+  border-radius: 4px;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+/* 通用的强制换行样式，处理长路径/长单词不换行导致溢出 */
+.break-any { word-break: break-all; overflow-wrap: anywhere; white-space: normal; }
+/* 彻底禁止 Descriptions 被长文本撑破宽度 */
+:deep(.upload-detail-desc .el-descriptions__body .el-descriptions__table) { table-layout: fixed; width: 100%; }
+:deep(.upload-detail-desc .el-descriptions__label),
+:deep(.upload-detail-desc .el-descriptions__content) {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+/* 让内容格子遵守容器宽度并可换行 */
+:deep(.upload-detail-desc .el-descriptions__content) { display: block; max-width: 100%; }
+/* 优化 Descriptions 边距，避免文本块贴边 */
+:deep(.el-descriptions--small.is-bordered .el-descriptions__cell) {
+  padding: 8px 12px;
 }
 </style>

@@ -33,6 +33,30 @@ global_data = {}
 global_data['dirty_tables'] = set()
 global_data['column_labels'] = {}
 
+# 通用：将空字符串/特殊字样转为 None，避免写入数值列失败
+def _normalize_empty_values(value):
+    try:
+        if value is None:
+            return None
+        # 直接 None
+        if isinstance(value, str):
+            s = value.strip()
+            if s == '':
+                return None
+            if s.lower() in {'nan', 'none', 'null'}:
+                return None
+        # numpy.nan 等
+        try:
+            import math
+            if isinstance(value, (int, float)):
+                if not math.isfinite(float(value)):
+                    return None
+        except Exception:
+            pass
+        return value
+    except Exception:
+        return value
+
 def mark_table_dirty(table_name: str):
     try:
         if not isinstance(table_name, str) or not table_name:
@@ -1194,6 +1218,60 @@ def list_columns():
             'numeric_columns': numeric_columns,
             'recommended_targets': recommended
         }), 200
+    except Exception as e:
+        traceback.print_exc(file=sys.stdout)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@analysis_bp.route('/distinct', methods=['GET'])
+def get_distinct_values():
+    """获取指定表某列的去重值列表（用于前端下拉选项）。
+    query: table=表名, column=列名
+    优先从数据库 SELECT DISTINCT，失败则回退到 CSV/DataFrame。
+    """
+    try:
+        table_name = request.args.get('table')
+        column = request.args.get('column')
+        if not table_name or not column:
+            return jsonify({'status': 'error', 'message': '缺少参数: table 或 column'}), 400
+
+        # 标识符安全校验，避免注入
+        import re as _re
+        ident_re = _re.compile(r'^[A-Za-z0-9_]+$')
+        if not ident_re.match(table_name) or not ident_re.match(column):
+            return jsonify({'status': 'error', 'message': '非法的表名或列名'}), 400
+
+        values = []
+        # DB 优先
+        try:
+            rows = fetch_all(f"SELECT DISTINCT {column} AS val FROM {table_name} WHERE {column} IS NOT NULL LIMIT 2000")
+            if rows:
+                for r in rows:
+                    v = r.get('val') if isinstance(r, dict) else (r[0] if r else None)
+                    if v is not None and v != '':
+                        values.append(str(v))
+        except Exception:
+            values = []
+
+        # 回退到 CSV/DataFrame
+        if not values:
+            df = get_table_data(table_name)
+            if df is not None and not df.empty and column in df.columns:
+                ser = df[column].dropna()
+                try:
+                    values = [str(v) for v in sorted(set(ser.astype(str).tolist()))]
+                except Exception:
+                    values = [str(v) for v in list(dict.fromkeys(ser.astype(str).tolist()))]
+
+        # 自然排序（数字友好），避免依赖额外库
+        try:
+            import re
+            def natural_key(s):
+                return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+            values = sorted(values, key=natural_key)
+        except Exception:
+            pass
+
+        return jsonify({'status': 'success', 'table': table_name, 'column': column, 'values': values}), 200
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -2841,14 +2919,6 @@ def create_record(table_name):
         if not data:
             return jsonify({'status': 'error', 'message': '请提供数据'}), 400
         
-        # 仅允许插入表中存在的列，过滤掉未知字段
-        try:
-            table_columns = set(get_columns(table_name) or [])
-        except Exception:
-            table_columns = set()
-        if table_columns:
-            data = {k: v for k, v in data.items() if k in table_columns}
-
         # 基础校验：需要主键/必填字段
         pk = get_primary_key_column(table_name) or 'id'
 
@@ -2883,9 +2953,12 @@ def create_record(table_name):
             # 若仍没有 student_id，后续必填校验会提示
 
         # ug 等表的主键需要显式提供
+        # 必填字段规则：
+        # - 大学成绩（university_grades）：要求存在主键（通常为 student_id），以便建立关联
+        # - 学生表（students）：不强制主键（通常为自增 student_id），交由数据库生成
         required_by_table = {
             'university_grades': [pk],
-            'students': [pk],
+            'students': [],
             'historical_grades': [],
             'exam_scores': [],
             'class_performance': []
@@ -2908,13 +2981,23 @@ def create_record(table_name):
         # 针对 university_grades，若提供了单次成绩，自动补全平均分
         if table_name == 'university_grades':
             def to_num(x):
+                """Convert to float; return None for empty/NaN/inf."""
                 try:
-                    import numpy as _np
-                    v = _np.nan if x is None or x == '' else x
-                    return float(v)
+                    if x is None or x == '':
+                        return None
+                    v = float(x)
+                    # 过滤 NaN/Inf
+                    import math
+                    if not math.isfinite(v):
+                        return None
+                    return v
                 except Exception:
                     try:
-                        return float(str(x))
+                        v = float(str(x))
+                        import math
+                        if not math.isfinite(v):
+                            return None
+                        return v
                     except Exception:
                         return None
             if 'calculus_avg_score' not in data:
@@ -2923,21 +3006,44 @@ def create_record(table_name):
                 if parts:
                     data['calculus_avg_score'] = round(sum(parts) / len(parts), 2)
 
+        # 针对 students：若数据库未配置自增且未提供 student_id，则使用 MAX(student_id)+1 生成
+        if table_name == 'students':
+            sid = data.get('student_id')
+            if sid in (None, '', []):
+                try:
+                    row = fetch_one("SELECT MAX(student_id) AS max_id FROM students")
+                    next_id = int((row.get('max_id') if row and row.get('max_id') is not None else 0)) + 1
+                    data['student_id'] = next_id
+                except Exception:
+                    # 若无法读取，退化到 1（可能会冲突，交由数据库报错提示）
+                    data['student_id'] = 1
+
+        # 仅允许插入表中存在的列，过滤掉未知字段（放在最后，保留临时解析字段如 student_no 的使用）
+        try:
+            table_columns = set(get_columns(table_name) or [])
+        except Exception:
+            table_columns = set()
+        if table_columns:
+            data = {k: v for k, v in data.items() if k in table_columns}
+
+        # 统一归一化空值，避免 '' 插入数值列失败
+        data = {k: _normalize_empty_values(v) for k, v in data.items()}
+
         # 构建INSERT SQL
         columns = list(data.keys())
         placeholders = ', '.join(['%s'] * len(columns))
-        column_names = ', '.join(columns)
-        
-        sql = f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})"
+        column_names = ', '.join([f"`{c}`" for c in columns])
+
+        sql = f"INSERT INTO `{table_name}` ({column_names}) VALUES ({placeholders})"
         values = [data[col] for col in columns]
-        
+
         from database import execute_query
         execute_query(sql, values)
-        
+
         # 清空缓存，强制重新加载
         if 'current_table' in global_data and global_data['current_table'] == table_name:
             global_data.clear()
-        
+
         return jsonify({
             'status': 'success',
             'message': '创建成功'
@@ -2959,22 +3065,60 @@ def update_record(table_name, record_id):
         if not data:
             return jsonify({'status': 'error', 'message': '请提供数据'}), 400
         
+        # 若更新 UG，且涉及三次成绩中的任意一项，则自动重算平均分（使用旧值填补缺失）
+        if table_name == 'university_grades':
+            try:
+                primary_key = get_primary_key_column(table_name)
+                row = fetch_one(f"SELECT * FROM `{table_name}` WHERE `{primary_key}` = %s", (record_id,))
+                def to_num(x):
+                    """Convert to float; return None for empty/NaN/inf."""
+                    try:
+                        if x is None or x == '':
+                            return None
+                        v = float(x)
+                        import math
+                        if not math.isfinite(v):
+                            return None
+                        return v
+                    except Exception:
+                        try:
+                            v = float(str(x))
+                            import math
+                            if not math.isfinite(v):
+                                return None
+                            return v
+                        except Exception:
+                            return None
+                if row:
+                    s1 = data.get('first_calculus_score', row.get('first_calculus_score'))
+                    s2 = data.get('second_calculus_score', row.get('second_calculus_score'))
+                    s3 = data.get('third_calculus_score', row.get('third_calculus_score'))
+                    parts = [to_num(s1), to_num(s2), to_num(s3)]
+                    parts = [p for p in parts if p is not None]
+                    if parts:
+                        data['calculus_avg_score'] = round(sum(parts) / len(parts), 2)
+            except Exception:
+                pass
+
+        # 统一归一化空值，避免 '' 更新数值列失败
+        data = {k: _normalize_empty_values(v) for k, v in (data or {}).items()}
+
         # 构建UPDATE SQL
-        set_clauses = ', '.join([f"{col} = %s" for col in data.keys()])
-        
+        set_clauses = ', '.join([f"`{col}` = %s" for col in data.keys()])
+
         # 确定主键列名
         primary_key = get_primary_key_column(table_name)
-        
-        sql = f"UPDATE {table_name} SET {set_clauses} WHERE {primary_key} = %s"
+
+        sql = f"UPDATE `{table_name}` SET {set_clauses} WHERE `{primary_key}` = %s"
         values = list(data.values()) + [record_id]
-        
+
         from database import execute_query
         result = execute_query(sql, values)
-        
+
         # 清空缓存
         if 'current_table' in global_data and global_data['current_table'] == table_name:
             global_data.clear()
-        
+
         return jsonify({
             'status': 'success',
             'message': '更新成功'
@@ -2994,9 +3138,9 @@ def delete_record(table_name, record_id):
     try:
         # 确定主键列名
         primary_key = get_primary_key_column(table_name)
-        
-        sql = f"DELETE FROM {table_name} WHERE {primary_key} = %s"
-        
+
+        sql = f"DELETE FROM `{table_name}` WHERE `{primary_key}` = %s"
+
         from database import execute_query
         execute_query(sql, [record_id])
         
@@ -3307,7 +3451,8 @@ def uploads_endpoint():
                     'fileSize': format_file_size_safe(r.get('file_size') or 0),
                     'status': r.get('status') or 'success',
                     'mime_type': r.get('mime_type'),
-                    'path': r.get('stored_path')
+                    'path': r.get('stored_path'),
+                    'message': r.get('message')
                 })
             return jsonify({'status': 'success', 'data': data}), 200
 
@@ -3396,9 +3541,17 @@ def uploads_endpoint():
                 try:
                     if fname.lower().endswith('.csv'):
                         try:
-                            df = pd.read_csv(str(target_path))
+                            df = pd.read_csv(
+                                str(target_path),
+                                keep_default_na=True,
+                                na_values=['NA','N/A','na','nan','NaN','NULL','null','None','none']
+                            )
                         except UnicodeDecodeError:
-                            df = pd.read_csv(str(target_path), encoding='gbk', errors='ignore')
+                            df = pd.read_csv(
+                                str(target_path), encoding='gbk', errors='ignore',
+                                keep_default_na=True,
+                                na_values=['NA','N/A','na','nan','NaN','NULL','null','None','none']
+                            )
                     elif fname.lower().endswith(('.xlsx', '.xls')):
                         try:
                             df = pd.read_excel(str(target_path))
@@ -3433,7 +3586,7 @@ def uploads_endpoint():
                     for idx, col in enumerate(list(df.columns)):
                         # 处理缺失/空白/NaN 列名优先生成中文占位名，尽量保留原始中文
                         base_name = _clean_column_name(col)
-                        if base_name in ('', 'nan', 'none'):
+                        if (not base_name) or (base_name.strip() == '') or (base_name.strip().lower() in ('nan','none','null')):
                             base_name = f"列{idx+1}"
                         # 去重：如重复则追加后缀 _2, _3...
                         unique = base_name
@@ -3485,13 +3638,52 @@ def uploads_endpoint():
                             for i in range(min(len(cols_tmp), len(ordered_new_cols))):
                                 cols_tmp[i] = ordered_new_cols[i]
                             df2.columns = cols_tmp
+                        # 统一将 'nan'/'null'/'none' 等文本与 NaN 转换为 None
+                        def _norm_cell(v):
+                            try:
+                                if v is None:
+                                    return None
+                                # pandas NaN
+                                if isinstance(v, float):
+                                    import math
+                                    if not math.isfinite(v):
+                                        return None
+                                s = str(v).strip()
+                                if s == '' or s.lower() in ('nan','none','null','na','n/a'):
+                                    return None
+                                return v
+                            except Exception:
+                                return v
+                        try:
+                            df2 = df2.applymap(_norm_cell)
+                        except Exception:
+                            pass
                         records = df2.where(pd.notnull(df2), None).to_dict(orient='records')
                         if records:
-                            cols_safe = list(df2.columns)
+                            # 与实际表结构对齐，避免 Unknown column 错误
+                            try:
+                                cols_exist = set(get_columns(table_name) or [])
+                            except Exception:
+                                cols_exist = set(df2.columns)
+                            cols_safe = [c for c in list(df2.columns) if c in cols_exist]
+                            if not cols_safe:
+                                raise RuntimeError('表结构与数据列完全不匹配，无法写入')
                             placeholders = ",".join(["%s"] * len(cols_safe))
                             insert_sql = f"INSERT INTO `{table_name}` (" + ",".join([f"`{c}`" for c in cols_safe]) + f") VALUES ({placeholders})"
                             params = [tuple(rec.get(c) for c in cols_safe) for rec in records]
-                            execute_many(insert_sql, params)
+                            try:
+                                execute_many(insert_sql, params)
+                            except Exception as ie:
+                                # 尝试容错：若仍提示 Unknown column，则再用交集列重试一次（已是交集，基本不会触发）
+                                if 'Unknown column' in str(ie):
+                                    cols_exist = set(get_columns(table_name) or [])
+                                    cols_safe = [c for c in list(df2.columns) if c in cols_exist]
+                                    placeholders = ",".join(["%s"] * len(cols_safe))
+                                    insert_sql = f"INSERT INTO `{table_name}` (" + ",".join([f"`{c}`" for c in cols_safe]) + f") VALUES ({placeholders})"
+                                    params = [tuple(rec.get(c) for c in cols_safe) for rec in records]
+                                    execute_many(insert_sql, params)
+                                else:
+                                    raise
 
                         # 维护列名映射：先清空再写入
                         try:
