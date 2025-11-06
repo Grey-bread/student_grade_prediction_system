@@ -2,6 +2,10 @@
 // 保持与后端蓝图前缀一致（/api）
 module.exports = {
   devServer: {
+    client: {
+      // 仅显示错误，不显示警告；如需彻底关闭 overlay，可设置环境变量 VUE_APP_OVERLAY=false
+      overlay: process.env.VUE_APP_OVERLAY === 'false' ? false : { errors: true, warnings: false }
+    },
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:5000',

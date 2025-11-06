@@ -267,7 +267,11 @@ export default {
         calibration: null,
         heatmap: null,
         errorGrade: null
-      }
+      },
+      // Resize 节流控制
+      _resizeRaf: null,
+      _resizeBusy: false,
+      _chartSizes: {}
     }
   },
   mounted() {
@@ -291,7 +295,36 @@ export default {
   },
   methods: {
     handleResize() {
-      try { Object.values(this.charts).forEach(ch => ch && ch.resize && ch.resize()) } catch (e) {}
+      if (this._resizeRaf) {
+        cancelAnimationFrame(this._resizeRaf)
+        this._resizeRaf = null
+      }
+      this._resizeRaf = requestAnimationFrame(() => {
+        if (this._resizeBusy) return
+        this._resizeBusy = true
+        try {
+          Object.entries(this.charts).forEach(([key, ch]) => {
+            if (ch && ch.getDom) {
+              const dom = ch.getDom()
+              if (dom) {
+                const w = dom.clientWidth || 0
+                const h = dom.clientHeight || 0
+                if (w > 0 && h > 0) {
+                  const last = this._chartSizes[key] || { w: -1, h: -1 }
+                  if (Math.abs(w - last.w) > 1 || Math.abs(h - last.h) > 1) {
+                    try { ch.resize() } catch (e) {}
+                    this._chartSizes[key] = { w, h }
+                  }
+                }
+              }
+            }
+          })
+        } catch (e) {
+          // 忽略非致命错误
+        } finally {
+          setTimeout(() => { this._resizeBusy = false }, 120)
+        }
+      })
     },
     async fetchTargetColumns() {
       try {
@@ -871,6 +904,8 @@ export default {
 .chart-container {
   width: 100%;
   height: 360px;
+  contain: layout paint size;
+  overflow: hidden;
 }
 .chart-container.small {
   height: 300px;

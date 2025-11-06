@@ -78,7 +78,7 @@
 
 
         <el-row :gutter="20">
-          <!-- 成绩分布图（左半行） -->
+          <!-- 成绩分布图 -->
           <el-col :span="12">
             <el-card class="chart-card" v-loading="loading.distribution">
               <template #header>
@@ -90,7 +90,7 @@
             </el-card>
           </el-col>
           
-          <!-- 饼图 - 分数段占比（右半行） -->
+          <!-- 饼图 - 分数段占比 -->
           <el-col :span="12">
             <el-card class="chart-card" v-loading="loading.pie">
               <template #header>
@@ -103,7 +103,7 @@
           </el-col>
         </el-row>
 
-        <!-- 底部行移除（避免空白占位） -->
+        <!-- 底部行移除 -->
       </el-tab-pane>
 
       <!-- 数据表可视化标签页 -->
@@ -370,6 +370,10 @@ export default {
         predScatter: null,
         fiBar: null
       },
+      // Resize 节流控制
+      _resizeRaf: null,
+      _resizeBusy: false,
+      _chartSizes: {},
       
       // 数据表配置
       tableConfig: {
@@ -614,8 +618,38 @@ export default {
     },
 
     handleResize() {
-      Object.values(this.charts).forEach(chart => {
-        chart?.resize()
+      // 使用 rAF 节流，避免触发 ResizeObserver 循环告警
+      if (this._resizeRaf) {
+        cancelAnimationFrame(this._resizeRaf)
+        this._resizeRaf = null
+      }
+      this._resizeRaf = requestAnimationFrame(() => {
+        if (this._resizeBusy) return
+        this._resizeBusy = true
+        try {
+          Object.entries(this.charts).forEach(([key, chart]) => {
+            if (chart && chart.getDom) {
+              const dom = chart.getDom()
+              if (dom) {
+                const w = dom.clientWidth || 0
+                const h = dom.clientHeight || 0
+                if (w > 0 && h > 0) {
+                  const last = this._chartSizes[key] || { w: -1, h: -1 }
+                  // 仅当尺寸发生变化时才触发 resize（容忍1px抖动）
+                  if (Math.abs(w - last.w) > 1 || Math.abs(h - last.h) > 1) {
+                    try { chart.resize() } catch (e) {}
+                    this._chartSizes[key] = { w, h }
+                  }
+                }
+              }
+            }
+          })
+        } catch (e) {
+          // 忽略 resize 过程中的非致命错误
+        } finally {
+          // 加大延时释放 busy，进一步避免连续尺寸抖动
+          setTimeout(() => { this._resizeBusy = false }, 120)
+        }
       })
     },
 
@@ -1429,6 +1463,9 @@ export default {
 .chart-container {
   height: 400px;
   width: 100%;
+  /* 隔离布局，减少观察者循环风险 */
+  contain: layout paint size;
+  overflow: hidden;
 }
 
 .chart-container.small {

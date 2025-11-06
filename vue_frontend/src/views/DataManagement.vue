@@ -242,16 +242,16 @@
       </template>
     </el-dialog>
 
-    <!-- 采集记录对话框 -->
-    <el-dialog v-model="runsVisible" :title="runsTitle" width="720px">
-      <el-table :data="runs" style="width:100%" border stripe empty-text="暂无记录">
-        <el-table-column prop="runAt" label="时间" width="180" />
-        <el-table-column prop="status" label="状态" width="100">
+    <!-- 采集记录对话框（小尺寸，无内部滚动） -->
+    <el-dialog v-model="runsVisible" :title="runsTitle" width="600px" class="fixed-runs-dialog">
+      <el-table :data="runs" style="width:100%" border stripe empty-text="暂无记录" size="small">
+        <el-table-column prop="runAt" label="时间" width="160" />
+        <el-table-column prop="status" label="状态" width="90">
           <template #default="scope">
             <el-tag :type="scope.row.status === 'success' ? 'success' : 'danger'">{{ scope.row.status }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="deltaRows" label="变化行数" width="120" />
+        <el-table-column prop="deltaRows" label="变化行数" width="100" />
         <el-table-column prop="error" label="错误信息" />
       </el-table>
     </el-dialog>
@@ -864,5 +864,23 @@ export default {
   .tab-content {
     padding: 15px;
   }
+}
+
+/* 固定“采集记录”对话框尺寸（通过 deep 选择器作用到 Teleport 到 body 的 DOM） */
+:deep(.fixed-runs-dialog) {
+  width: 600px !important;
+  max-width: 600px;
+}
+:deep(.fixed-runs-dialog .el-dialog__body) {
+  height: auto;
+  max-height: none;
+  overflow: visible;
+  padding-top: 10px;
+}
+:deep(.fixed-runs-dialog .el-dialog__header) {
+  border-bottom: 1px solid #ebeef5;
+}
+:deep(.fixed-runs-dialog .el-dialog__footer) {
+  border-top: 1px solid #ebeef5;
 }
 </style>

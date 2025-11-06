@@ -11,7 +11,6 @@
 - JSON_AS_ASCII=False 以支持中文返回
 """
 
-# -*- coding: utf-8 -*-
 from flask import Flask, jsonify
 from flask_cors import CORS
 import traceback, sys, logging

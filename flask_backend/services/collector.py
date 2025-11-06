@@ -7,7 +7,7 @@ Configuration per data source (stored in data_sources.config as JSON):
   "table": "historical_grades",        # required: table name to watch
   "key_column": "id",                  # optional: integer auto-increment PK to diff by
   "updated_at_column": "updated_at",   # optional: DATETIME column to diff by if no key_column
-  "interval_seconds": 30                # optional: polling interval per source (default 30)
+    "interval_seconds": 600               # optional: polling interval per source (default 600 = 10 minutes)
 }
 
 If both key_column and updated_at_column exist, key_column takes precedence.
@@ -51,7 +51,8 @@ class DataCollector:
             print('[Collector] APScheduler 未安装，自动采集功能不可用')
             return
         self.scheduler = BackgroundScheduler()
-        self.scheduler.add_job(self._scan_and_schedule_jobs, 'interval', seconds=30, id='scan_sources', replace_existing=True)
+        # 全局扫描频率：每10分钟扫描一次并同步数据源
+        self.scheduler.add_job(self._scan_and_schedule_jobs, 'interval', seconds=600, id='scan_sources', replace_existing=True)
         self.scheduler.start()
         self.running = True
         print('[Collector] 自动采集调度已启动')
@@ -84,7 +85,8 @@ class DataCollector:
                 if not sid or not table:
                     continue
                 configured_ids.add(sid)
-                seconds = int(cfg.get('interval_seconds') or 30)
+                # 每个源的轮询频率：如未配置，默认10分钟一次
+                seconds = int(cfg.get('interval_seconds') or 600)
                 job_id = f'source_{sid}'
                 if self.scheduler.get_job(job_id):
                     # Update trigger if interval changed
