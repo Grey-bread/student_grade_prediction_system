@@ -625,8 +625,9 @@ def student_portrait():
         if not student_id:
             return jsonify({'status': 'error', 'message': '缺少参数: student_id'}), 400
 
+        # 支持前端使用参数名 'table'（也兼容老参数名 'target_table'）
         # 默认改为使用 UG 数据集进行预测
-        target_table = request.args.get('target_table') or 'university_grades'
+        target_table = request.args.get('target_table') or request.args.get('table') or 'university_grades'
         target_column = request.args.get('target_column')
         include_subjects = str(request.args.get('include_subjects', 'true')).lower() != 'false'
 
@@ -645,6 +646,11 @@ def student_portrait():
                 })
 
         # 2) 成绩预测
+        # 调试日志：记录前端请求的表名与学生ID，便于排查使用了哪个表
+        try:
+            print(f"[DEBUG student_portrait] student_id={student_id} target_table={target_table}")
+        except Exception:
+            pass
         def _auto_target(df: pd.DataFrame):
             if df is None or df.empty:
                 return None
@@ -730,12 +736,16 @@ def student_portrait():
 
         
 
-        # 3) 近三次趋势（仅使用 UG；缺失按 0 补齐；明确使用 first/second/third_calculus_score）
+        # 3) 近三次趋势：优先使用前端/预测使用的表（target_table），若目标表没有三次分数再回退到 university_grades
         labels = ['第一次','第二次','第三次']
         ug_cols = ['first_calculus_score','second_calculus_score','third_calculus_score']
         values = [0.0, 0.0, 0.0]
         try:
-            ug = get_table_data('university_grades')
+            # 先尝试用目标表
+            ug = get_table_data(target_table)
+            if ug is None or ug.empty or 'student_id' not in ug.columns or not all(c in ug.columns for c in ug_cols):
+                # 回退到 university_grades
+                ug = get_table_data('university_grades')
             if ug is not None and not ug.empty and 'student_id' in ug.columns and all(c in ug.columns for c in ug_cols):
                 # 转为数值
                 for c in ug_cols:

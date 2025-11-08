@@ -9,6 +9,12 @@
 
       <!-- 查询条件：按学号/姓名选择或输入ID -->
       <el-form :inline="true" class="query-form">
+        <el-form-item label="成绩表">
+          <el-select v-model="query.selectedGradeTable" placeholder="选择成绩表" style="width: 200px;" @focus="fetchGradeTables">
+            <el-option v-for="t in gradeTables" :key="t" :label="getTableLabel(t)" :value="t" />
+          </el-select>
+        </el-form-item>
+        
         <el-form-item label="按学号/姓名选择">
           <el-select v-model="query.selectedStudent" filterable clearable placeholder="输入学号或姓名搜索"
                      style="width: 300px;" @focus="ensureStudentsLoaded" @change="onSelectStudent">
@@ -16,7 +22,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="学生ID">
-          <el-input v-model="query.studentId" placeholder="或直接输入学生ID" style="width: 200px;" />
+          <el-input v-model="query.studentId" placeholder="直接输入学生ID" style="width: 150px;" />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="loading" @click="loadPortrait">生成画像</el-button>
@@ -193,7 +199,8 @@ export default {
   data() {
     return {
       loading: false,
-      query: { selectedStudent: null, studentId: '' },
+      query: { selectedStudent: null, studentId: '', selectedGradeTable: null },
+      gradeTables: [],
       studentsList: [],
       portrait: null,
       analysisFb: null,
@@ -201,11 +208,45 @@ export default {
     }
   },
   mounted() {
+    this.fetchGradeTables()
     this.ensureStudentsLoaded().catch(()=>{})
+  },
+  watch: {
+    'query.selectedGradeTable'(newVal) {
+      // 切换成绩表时清理旧数据，避免继续显示上一个表的结果
+      this.onGradeTableChange(newVal)
+    }
   },
   beforeUnmount() {
   },
   methods: {
+    // Grade tables 支持
+    async fetchGradeTables() {
+      if (this.gradeTables && this.gradeTables.length) return
+      try {
+        const res = await axios.get('/api/analysis/grade-tables')
+        if (res.data?.status === 'success') {
+          this.gradeTables = res.data.tables || []
+          if (!this.query.selectedGradeTable && this.gradeTables.length) this.query.selectedGradeTable = this.gradeTables[0]
+        }
+      } catch (e) {
+        // 忽略
+      }
+    },
+    getTableLabel(t) {
+      if (!t) return ''
+      if (/^[0-9._-]+$/.test(t) || t.length <= 3) return t
+      const map = { university_grades:'大学成绩', historical_grades:'历史成绩', exam_scores:'考试成绩', class_performance:'课堂表现' }
+      return map[t] || t
+    },
+    async onGradeTableChange(table) {
+      this.portrait = null
+      this.analysisFb = null
+      this.historyList = []
+      // 预取学生列表（不强制），供下拉使用（如果后端需要按表过滤，可扩展）
+      try { await this.ensureStudentsLoaded() } catch {}
+    },
+
     formatStudentLabel(s) {
       return `${s.student_no || '—'} - ${s.name || '—'}${s.grade ? ' ｜ '+s.grade : ''}${s.class ? ' '+s.class : ''}`
     },
@@ -253,17 +294,23 @@ export default {
       this.portrait = null
       this.analysisFb = null
       try {
-        const res = await axios.get('/api/teacher/student-portrait', { params: { student_id: this.query.studentId } })
+        const params = { student_id: this.query.studentId }
+        if (this.query.selectedGradeTable) params.table = this.query.selectedGradeTable
+        const res = await axios.get('/api/teacher/student-portrait', { params })
         if (res.data?.status === 'success') {
           this.portrait = res.data.data
           // 读取学生反馈历史
           try {
-            const h = await axios.get('/api/analysis/student-feedback/history', { params: { student_id: this.query.studentId, limit: 50 } })
+            const hparams = { student_id: this.query.studentId, limit: 50 }
+            if (this.query.selectedGradeTable) hparams.table = this.query.selectedGradeTable
+            const h = await axios.get('/api/analysis/student-feedback/history', { params: hparams })
             this.historyList = (h.data?.status === 'success' && Array.isArray(h.data.data)) ? h.data.data : []
           } catch (_) { this.historyList = [] }
           // 追加获取“学生反馈”分析结果，纳入薄弱点与建议
           try {
-            const fb = await axios.get('/api/analysis/student-feedback', { params: { student_id: this.query.studentId } })
+            const fbparams = { student_id: this.query.studentId }
+            if (this.query.selectedGradeTable) fbparams.table = this.query.selectedGradeTable
+            const fb = await axios.get('/api/analysis/student-feedback', { params: fbparams })
             if (fb.data?.status === 'success') this.analysisFb = fb.data
           } catch (_) {}
         } else {
@@ -286,7 +333,17 @@ export default {
 .main-card { margin: 20px; }
 .card-header { display: flex; align-items: baseline; gap: 12px; }
 .card-header .sub { color: #909399; font-size: 13px; }
-.query-form { margin-bottom: 12px; }
+  .query-form {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 30px;
+    margin-bottom: 12px;
+  }
+  .query-form .el-form-item {
+    margin-right: 0;
+    margin-bottom: 0;
+  }
 .kpi-row { margin-bottom: 12px; }
 .section-card { margin-top: 12px; }
 .section-header { font-weight: 600; }
@@ -297,8 +354,18 @@ export default {
 .kpi-sub { color: #a0aec0; font-size: 12px; margin-top: 4px; }
 .pred-card { display: flex; gap: 20px; align-items: center; justify-content: flex-start; }
 .pred-card.center { justify-content: center; }
-.kpi-main { min-width: 220px; padding-right: 16px; border-right: 1px dashed #e5e7eb; }
-.pred-card.center .kpi-main { border-right: none; text-align: center; }
+  /* 将成绩区域改为弹性容器，垂直与水平居中显示主要数值 */
+  .kpi-main {
+    min-width: 220px;
+    padding-right: 16px;
+    border-right: 1px dashed #e5e7eb;
+    display: flex;
+    flex-direction: column;
+    align-items: center; /* 水平居中 */
+    justify-content: center; /* 垂直居中 */
+    text-align: center;
+  }
+  .pred-card.center .kpi-main { border-right: none; }
 .kpi-side { flex: 1; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip { background: #f5f7fa; padding: 6px 10px; border-radius: 999px; font-size: 13px; }

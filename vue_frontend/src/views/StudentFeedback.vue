@@ -40,7 +40,7 @@
         </el-form-item>
 
         <el-form-item label="学生ID">
-          <el-input v-model="query.studentId" placeholder="或直接输入学生ID" style="width: 120px;" />
+          <el-input v-model="query.studentId" placeholder="直接输入学生ID" style="width: 150px;" />
         </el-form-item>
 
         <el-form-item>

@@ -4,29 +4,54 @@
     <el-tabs v-model="activeTab" type="card" class="visualization-tabs" @tab-change="handleTabChange">
       <!-- 图表可视化标签页 -->
       <el-tab-pane label="📊 图表可视化" name="charts">
-        <!-- 控制面板 -->
+        <!-- 控制面板（与数据表可视化样式统一） -->
         <el-card class="control-panel" shadow="hover">
-          <el-form :inline="true" size="small">
-            <el-form-item label="数据表">
-              <el-select v-model="chartDataTable" placeholder="选择数据源" @change="loadChartData" style="width: 220px">
+          <div class="filter-container">
+            <div class="control-item">
+              <span class="control-label">成绩表</span>
+              <el-select v-model="chartDataTable" placeholder="选择数据源" class="control-input" @change="loadChartData">
                 <el-option
                   v-for="t in chartTables"
                   :key="t"
                   :label="getTableLabel(t)"
                   :value="t"
                 >
-                  <span style="float:left">{{ getTableLabel(t) }}</span>
+                  <span style="float: left">{{ getTableLabel(t) }}</span>
                 </el-option>
               </el-select>
-            </el-form-item>
-            <el-form-item label="学生ID">
-              <el-input-number v-model="selectedStudentId" :min="1" :max="999999" @change="onStudentIdChange" />
-            </el-form-item>
-            <el-form-item>
-              <el-button type="primary" @click="loadChartData" icon="Refresh">刷新图表</el-button>
-              <el-button type="success" :loading="loading.exportReport" @click="exportAnalysisReport" icon="Download">导出报告</el-button>
-            </el-form-item>
-          </el-form>
+            </div>
+
+            <div class="control-item">
+              <span class="control-label">按学号/姓名选择</span>
+              <el-select
+                v-model="studentSelector"
+                filterable
+                remote
+                clearable
+                placeholder="输入学号或姓名搜索"
+                :remote-method="loadStudentOptions"
+                @change="onStudentSelectorChange"
+                class="control-input"
+                @visible-change="val => { if (val && !studentOptions.length) loadStudentOptions() }"
+              >
+                <el-option
+                  v-for="stu in studentOptions"
+                  :key="stu.student_id"
+                  :label="formatStudentOption(stu)"
+                  :value="stu.student_id"
+                >
+                  <span style="float: left">{{ formatStudentOption(stu) }}</span>
+                </el-option>
+              </el-select>
+            </div>
+
+            <div class="action-section">
+              <div class="action-wrap">
+                <el-button type="primary" plain @click="loadChartData" icon="Refresh">刷新图表</el-button>
+                <el-button type="success" :loading="loading.exportReport" @click="exportAnalysisReport" icon="Download">导出报告</el-button>
+              </div>
+            </div>
+          </div>
         </el-card>
 
         <el-row :gutter="20">
@@ -361,6 +386,7 @@ export default {
     studentOptions: [],
     studentOptionsLoading: false,
     selectedStudentForForm: null,
+  studentSelector: null,
       
       // Loading states
       loading: {
@@ -1268,12 +1294,6 @@ export default {
         birth_date: '出生日期',
         contact_phone: '联系电话',
         email: '邮箱',
-        total_score: '总成绩',
-        final_score: '期末成绩',
-        midterm_score: '期中成绩',
-        usual_score: '平时成绩',
-        score: '分数',
-        ranking: '排名',
         calculus_score: '高等数学成绩',
         calculus_avg_score: '高数平均',
         first_calculus_score: '高数第一次',
@@ -1283,12 +1303,6 @@ export default {
         study_hours: '学习时长',
         attendance_count: '出勤次数',
         practice_count: '刷题数',
-        performance_id: '表现ID',
-        course_id: '课程ID',
-        exam_type_id: '考试类型ID',
-        exam_name: '考试名称',
-        exam_date: '考试日期',
-        score_level: '成绩等级',
         teacher_id: '教师ID',
         comments: '评语',
         behavior_score: '行为分数',
@@ -1513,6 +1527,13 @@ export default {
       }
     },
 
+    onStudentSelectorChange(val) {
+      if (!val) return
+      this.selectedStudentId = val
+      // 同步加载学生详情与图表
+      this.onStudentIdChange()
+    },
+
     formatStudentOption(stu) {
       if (!stu) return ''
       const no = stu.student_no ? `学号:${stu.student_no}` : '学号:未知'
@@ -1627,8 +1648,12 @@ export default {
   margin-bottom: 20px;
 }
 
-.chart-card, .filter-card, .table-card {
+.chart-card, .filter-card, .table-card, .control-panel {
   margin-bottom: 20px;
+  background: #fff;
+  border-radius: 6px;
+  padding: 12px 16px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
 
 .card-header {
@@ -1647,8 +1672,8 @@ export default {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 15px;
+  flex-wrap: nowrap; /* 强制一行显示，必要时使用滚动或响应式断点 */
+  gap: 8px;
 }
 
 .search-section, .action-section {
@@ -1657,12 +1682,81 @@ export default {
   gap: 10px;
 }
 
+.filter-container .action-section {
+  margin-left: 8px;
+}
+
+.filter-container > .control-item,
+.filter-container > .action-section {
+  flex: 1 1 0%;
+  min-width: 0; /* allow children to shrink */
+}
+
+.control-input >>> .el-input__inner,
+.control-input >>> .el-select .el-input__inner {
+  width: 100%;
+}
+
+.control-input {
+  width: 70%;
+}
+
+.action-section { display: flex; justify-content: center; }
+.action-wrap { display:flex; gap: 12px; }
+
+/* 使 control-panel 内的控件高度、圆角与表格区域一致（将图像1 -> 图像2 风格） */
+.control-panel .el-select .el-input__inner,
+.control-panel .el-input__inner,
+.control-panel .el-input-number__wrapper,
+.control-panel .el-input,
+.filter-card .el-select .el-input__inner {
+  height: 38px;
+  line-height: 38px;
+  padding: 6px 12px;
+  border-radius: 8px;
+}
+
+.control-panel .el-button,
+.filter-card .el-button {
+  border-radius: 8px;
+  padding: 6px 14px;
+  min-width: 96px;
+}
+
+.control-panel .el-button--primary,
+.filter-card .el-button--primary {
+  background-color: #409EFF;
+  border-color: #409EFF;
+  color: #fff;
+}
+.control-panel .el-button--success,
+.filter-card .el-button--success {
+  background-color: #67C23A;
+  border-color: #67C23A;
+  color: #fff;
+}
+.control-panel .el-button--info,
+.filter-card .el-button--info {
+  background-color: #909399;
+  border-color: #909399;
+  color: #fff;
+}
+
+/* 让控件在一行内垂直居中，保持与图像2示例一致 */
+.filter-container .search-section,
+.filter-container .action-section {
+  align-items: center;
+}
+
 .chart-container {
   height: 400px;
   width: 100%;
-  /* 隔离布局，减少观察者循环风险 */
+  padding: 8px 0;
   contain: layout paint size;
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .chart-container.small {
@@ -1684,10 +1778,6 @@ export default {
   text-align: center;
 }
 
-/* 已移除统计信息相关样式 */
-
-/* 已移除表头统计标签 */
-
 @media (max-width: 768px) {
   .filter-container {
     flex-direction: column;
@@ -1698,5 +1788,31 @@ export default {
     justify-content: center;
     flex-wrap: wrap;
   }
+}
+
+/* 当宽度不足时，允许横向滚动以保持一行布局 */
+@media (min-width: 769px) {
+  .control-panel { overflow-x: auto; }
+}
+
+/* control-panel 左侧标签样式 */
+.control-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.control-label {
+  display: inline-block;
+  width: auto; /* 由内容决定宽度，避免强制换行 */
+  color: #606266;
+  font-size: 14px;
+  text-align: left;
+  white-space: nowrap; /* 保持文字在一行显示 */
+  margin-right: 8px;
+}
+
+@media (max-width: 900px) {
+  .control-label { width: auto; }
+  .filter-container { gap: 10px; }
 }
 </style>
