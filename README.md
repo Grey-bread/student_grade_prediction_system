@@ -171,7 +171,7 @@ npm run serve
   - `charts/radar_indicators.csv` 与 `charts/radar_series.csv`
   - `meta.json`：生成时间、表名、学生ID、趋势类型
 
-> 如果你更希望导出中文表头的 CSV，可在后端 `/export-table` 中将列名通过 `feature_name_map` 做一次映射（需求明确后可补）。
+> 如果更希望导出中文表头的 CSV，可在后端 `/export-table` 中将列名通过 `feature_name_map` 做一次映射。
 
 ---
 
