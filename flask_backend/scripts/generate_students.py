@@ -2,12 +2,16 @@ import csv
 import os
 import random
 from datetime import datetime, timedelta
+import argparse
 
 # Deterministic seed for reproducibility
 random.seed(20251105)
 
-OUT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'database_datasets', 'students.csv'))
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+OUT_PATH = os.path.join(ROOT_DIR, 'database_datasets', 'students.csv')
+OUT_PATH_PUBLIC = os.path.join(ROOT_DIR, 'vue_frontend', 'public', 'data', 'students.csv')
 os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+os.makedirs(os.path.dirname(OUT_PATH_PUBLIC), exist_ok=True)
 
 surnames = [
     '王','李','张','刘','陈','杨','赵','黄','周','吴','徐','孙','胡','朱','高','林','何','郭','马','罗',
@@ -68,16 +72,15 @@ def make_birth(grade: str) -> str:
     return day.strftime('%Y-%m-%d')
 
 
-def main():
+def main(count: int = 10000):
     rows = []
     # Balanced distribution among grades and classes
-    for i in range(1, 601):
-        # 平均分配 4 个年级，每个年级约 150 人
-        idx = (i - 1) // 150
-        grade = grades[min(idx, 3)]
+    for i in range(1, count + 1):
+        # roughly distribute across available grades
+        grade = grades[((i - 1) * len(grades)) // max(1, count)]
         clazz_num = random.randint(1, 12)
         name = make_name()
-        gender = random.choice(['男','女'])
+        gender = random.choice(['男', '女'])
         student_no = make_student_no(i)
         birth = make_birth(grade)
         phone = make_phone()
@@ -95,15 +98,19 @@ def main():
             'email': email,
         })
 
-    # Write CSV
-    fieldnames = ['student_id','student_no','name','gender','grade','class','birth_date','contact_phone','email']
-    with open(OUT_PATH, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    # Write CSV to backend dataset and front-end public data
+    fieldnames = ['student_id', 'student_no', 'name', 'gender', 'grade', 'class', 'birth_date', 'contact_phone', 'email']
+    for outp in (OUT_PATH, OUT_PATH_PUBLIC):
+        with open(outp, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
 
-    print(f"[OK] Generated {len(rows)} students to {OUT_PATH}")
+    print(f"[OK] Generated {len(rows)} students to {OUT_PATH} and {OUT_PATH_PUBLIC}")
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Generate synthetic students dataset')
+    parser.add_argument('--count', type=int, default=10000, help='Number of student records to generate')
+    args = parser.parse_args()
+    main(count=args.count)

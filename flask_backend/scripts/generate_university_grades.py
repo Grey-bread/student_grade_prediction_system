@@ -133,14 +133,13 @@ def synthesize_row(student: Dict[str, str]) -> Dict[str, Optional[str]]:
     }
 
 
-def main(allow_missing: bool = False):
+def main(allow_missing: bool = False, count: int = 10000):
     global ALLOW_MISSING
     ALLOW_MISSING = bool(allow_missing)
 
     students = load_students()
-
-    # Only take 600 if there are more; if fewer, generate for available.
-    target_n = min(600, len(students))
+    # Respect requested count but do not exceed available students in students.csv
+    target_n = min(count, len(students))
     rows: List[Dict[str, Optional[str]]] = []
 
     for i in range(target_n):
@@ -159,5 +158,6 @@ def main(allow_missing: bool = False):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate synthetic university grades dataset')
     parser.add_argument('--allow-missing', action='store_true', help='If set, generate missing values according to probabilities')
+    parser.add_argument('--count', type=int, default=10000, help='Number of grade records to generate (will not exceed students.csv rows)')
     args = parser.parse_args()
-    main(allow_missing=args.allow_missing)
+    main(allow_missing=args.allow_missing, count=args.count)
