@@ -7,9 +7,9 @@
           <div class="logo-icon">
             <el-icon :size="32"><School /></el-icon>
           </div>
-          <h1>学生成绩<br>预测系统</h1>
+          <h1>学生成绩<br />预测系统</h1>
         </div>
-        
+
         <!-- 侧边栏菜单 -->
         <el-menu
           :router="true"
@@ -18,7 +18,7 @@
           background-color="#1f2329"
           text-color="rgba(255, 255, 255, 0.9)"
           active-text-color="#409eff"
-          router>
+        >
           <el-menu-item index="/data-management">
             <el-icon><DataLine /></el-icon>
             <span>数据管理</span>
@@ -45,7 +45,7 @@
           </el-menu-item>
         </el-menu>
       </aside>
-      
+
       <!-- 主内容区域 -->
       <div class="main-content-wrapper">
         <!-- 顶部导航栏 -->
@@ -59,20 +59,26 @@
           <div class="user-info">
             <el-dropdown @command="handleUserCommand">
               <span class="user-dropdown">
-                <el-avatar size="small" :src="userAvatar">{{ !userAvatar && username ? username.charAt(0) : '用' }}</el-avatar>
-                <span>{{ username || '未登录' }}</span>
+                <el-avatar size="small" :src="userAvatar">{{
+                  !userAvatar && username ? username.charAt(0) : "用"
+                }}</el-avatar>
+                <span>{{ username || "未登录" }}</span>
                 <el-icon class="el-icon--right"><ArrowDown /></el-icon>
               </span>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item command="profile">个人信息</el-dropdown-item>
-                  <el-dropdown-item divided command="logout">退出登录</el-dropdown-item>
+                  <el-dropdown-item command="profile"
+                    >个人信息</el-dropdown-item
+                  >
+                  <el-dropdown-item divided command="logout"
+                    >退出登录</el-dropdown-item
+                  >
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
           </div>
         </header>
-        
+
         <!-- 页面内容 -->
         <main class="page-content">
           <router-view v-slot="{ Component }">
@@ -85,7 +91,7 @@
         </main>
       </div>
     </div>
-    
+
     <!-- 认证页面（登录/注册） -->
     <div v-else class="auth-container">
       <router-view v-slot="{ Component }">
@@ -95,22 +101,31 @@
       </router-view>
     </div>
   </div>
-<!--
+  <!--
   根组件：
   - 左侧为主导航（数据管理/分析/训练/可视化/学生反馈/教师面板）
   - 顶部包含面包屑与用户信息
   - 非认证路由展示主框架；认证路由（登录/注册）展示独立容器
--->
-</template>
+--></template>
 
 <script>
 // 根组件负责整体布局与用户状态展示，不包含具体业务数据请求
-import { School, DataLine, Histogram, PieChart, Monitor, ChatDotRound, Grid, ArrowDown, DataBoard, Database } from '@element-plus/icons-vue'
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import {
+  School,
+  DataLine,
+  Histogram,
+  PieChart,
+  Monitor,
+  ChatDotRound,
+  Grid,
+  ArrowDown,
+  Database,
+} from "@element-plus/icons-vue";
+import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 
 export default {
-  name: 'App',
+  name: "App",
   components: {
     Database,
     PieChart,
@@ -120,125 +135,129 @@ export default {
     School,
     ArrowDown,
     DataLine,
-    Histogram
+    Histogram,
   },
   setup() {
-    const route = useRoute()
-    const router = useRouter()
-    const username = ref(localStorage.getItem('username') || '')
-    const userAvatar = ref(localStorage.getItem('userAvatar') || '')
-    
+    const route = useRoute();
+    const router = useRouter();
+    const username = ref(localStorage.getItem("username") || "");
+    const userAvatar = ref(localStorage.getItem("userAvatar") || "");
+
     // 头像变更事件处理函数
     const handleAvatarChange = (event) => {
-      userAvatar.value = event.detail
-    }
-    
+      userAvatar.value = event.detail;
+    };
+
     // 监听头像变更事件
     onMounted(() => {
-      window.addEventListener('avatarChanged', handleAvatarChange)
-    })
-    
+      window.addEventListener("avatarChanged", handleAvatarChange);
+    });
+
     // 组件卸载时移除事件监听
     onBeforeUnmount(() => {
-      window.removeEventListener('avatarChanged', handleAvatarChange)
-    })
-    
-  // 认证路由列表（无需展示主侧栏与顶部栏）
-    const authRoutes = ['/login', '/register']
-    
+      window.removeEventListener("avatarChanged", handleAvatarChange);
+    });
+
+    // 认证路由列表（无需展示主侧栏与顶部栏）
+    const authRoutes = ["/login", "/register"];
+
     // 计算属性：是否为认证路由
     const isAuthRoute = computed(() => {
-      return authRoutes.includes(route.path)
-    })
-    
+      return authRoutes.includes(route.path);
+    });
+
     // 计算属性：当前活跃路由
     const activeRoute = computed(() => {
-      return route.path || '/'  
-    })
-    
+      return route.path || "/";
+    });
+
     // 计算属性：当前页面标题
     const currentPageTitle = computed(() => {
       const titleMap = {
-        '/data-management': '数据管理',
-        '/data-analysis': '数据分析',
-        '/visualization': '可视化',
-        '/model-training': '模型训练',
-        '/student-feedback': '学生反馈',
-        '/teacher-dashboard': '教师面板',
-        '/profile': '个人信息'
-      }
-      return titleMap[route.path] || ''
-    })
-    
-  // 用户菜单命令处理（跳转个人信息与退出登录）
+        "/data-management": "数据管理",
+        "/data-analysis": "数据分析",
+        "/visualization": "可视化",
+        "/model-training": "模型训练",
+        "/student-feedback": "学生反馈",
+        "/teacher-dashboard": "教师面板",
+        "/profile": "个人信息",
+      };
+      return titleMap[route.path] || "";
+    });
+
+    // 用户菜单命令处理（跳转个人信息与退出登录）
     const handleUserCommand = (command) => {
       switch (command) {
-        case 'profile':
+        case "profile":
           // 导航到个人信息页面
-          router.push('/profile')
-          break
-        case 'settings':
-          console.log('打开设置')
-          break
-        case 'logout':
+          router.push("/profile");
+          break;
+        case "settings":
+          console.log("打开设置");
+          break;
+        case "logout":
           // 清除token
-          localStorage.removeItem('token')
-          localStorage.removeItem('username')
-          localStorage.removeItem('userAvatar')
-          username.value = ''
-          userAvatar.value = ''
-          router.push('/login')
-          break
+          localStorage.removeItem("token");
+          localStorage.removeItem("username");
+          localStorage.removeItem("userAvatar");
+          username.value = "";
+          userAvatar.value = "";
+          router.push("/login");
+          break;
       }
-    }
-    
-  // 从 localStorage 同步登录状态（用户名与头像）
-    const checkLoginStatus = () => {
-      const storedUsername = localStorage.getItem('username') || ''
-      const storedAvatar = localStorage.getItem('userAvatar') || ''
-      username.value = storedUsername
-      userAvatar.value = storedAvatar
-    }
-    
-  // 监听路由变化：
-  // - 同步一次登录状态
-  // - 若目标为受保护路由且无 token，则回到登录
-    watch(() => route.path, (newPath, oldPath) => {
-      // 每次路由变化都尝试同步一次登录信息
-      checkLoginStatus()
+    };
 
-      // 跳过从登录页到其他页面的跳转，避免立即检查导致退出
-      if (oldPath === '/login' && newPath !== '/login') {
-        return
-      }
-      
-      // 如果不是认证路由且没有token，重定向到登录页
-      const token = localStorage.getItem('token')
-      if (!authRoutes.includes(newPath) && !token) {
-        router.push('/login').catch(err => {
-          // 忽略导航重复的错误
-          if (err.name !== 'NavigationDuplicated') {
-            console.error('路由跳转失败:', err)
-          }
-        })
-      }
-    }, { immediate: false })
-    
+    // 从 localStorage 同步登录状态（用户名与头像）
+    const checkLoginStatus = () => {
+      const storedUsername = localStorage.getItem("username") || "";
+      const storedAvatar = localStorage.getItem("userAvatar") || "";
+      username.value = storedUsername;
+      userAvatar.value = storedAvatar;
+    };
+
+    // 监听路由变化：
+    // - 同步一次登录状态
+    // - 若目标为受保护路由且无 token，则回到登录
+    watch(
+      () => route.path,
+      (newPath, oldPath) => {
+        // 每次路由变化都尝试同步一次登录信息
+        checkLoginStatus();
+
+        // 跳过从登录页到其他页面的跳转，避免立即检查导致退出
+        if (oldPath === "/login" && newPath !== "/login") {
+          return;
+        }
+
+        // 如果不是认证路由且没有token，重定向到登录页
+        const token = localStorage.getItem("token");
+        if (!authRoutes.includes(newPath) && !token) {
+          router.push("/login").catch((err) => {
+            // 忽略导航重复的错误
+            if (err.name !== "NavigationDuplicated") {
+              console.error("路由跳转失败:", err);
+            }
+          });
+        }
+      },
+      { immediate: false },
+    );
+
     // 组件挂载时检查登录状态
     onMounted(() => {
-      checkLoginStatus()
-    })
-    
+      checkLoginStatus();
+    });
+
     return {
       isAuthRoute,
       activeRoute,
       currentPageTitle,
       username,
       userAvatar,
-      handleUserCommand
-    }
-  }
-}
+      handleUserCommand,
+    };
+  },
+};
 </script>
 
 <style>
@@ -249,8 +268,15 @@ export default {
   box-sizing: border-box;
 }
 
-html, body {
-  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+html,
+body {
+  font-family:
+    "Segoe UI",
+    -apple-system,
+    BlinkMacSystemFont,
+    "PingFang SC",
+    "Microsoft YaHei",
+    sans-serif;
   background-color: #f0f2f5;
   color: #333;
   font-size: 14px;
@@ -326,14 +352,14 @@ html, body {
 .el-menu-item {
   display: flex;
   align-items: center;
-  justify-content: flex-start;    /* 让图标+文字贴一起 */
-  padding: 0 40px !important;     /* ← 减小左右空白 */
+  justify-content: flex-start; /* 让图标+文字贴一起 */
+  padding: 0 40px !important; /* ← 减小左右空白 */
   height: 50px;
   border-radius: 14px;
 }
 
 .el-menu-item .el-icon {
-  margin-right: 8px;              /* 适当距离 */
+  margin-right: 8px; /* 适当距离 */
 }
 
 .el-menu-item span {
@@ -481,11 +507,14 @@ html, body {
 /* 背景装饰元素 */
 /* 关闭全局伪元素，避免颜色干扰登录/注册自定义背景 */
 .auth-container::before,
-.auth-container::after { display: none !important; }
+.auth-container::after {
+  display: none !important;
+}
 
 /* 浮动动画 */
 @keyframes float {
-  0%, 100% {
+  0%,
+  100% {
     transform: translate(0, 0) rotate(0deg);
   }
   50% {
@@ -494,15 +523,18 @@ html, body {
 }
 
 /* 动画效果 */
-.fade-enter-active, .fade-leave-active {
+.fade-enter-active,
+.fade-leave-active {
   transition: opacity 0.3s ease;
 }
 
-.fade-enter-from, .fade-leave-to {
+.fade-enter-from,
+.fade-leave-to {
   opacity: 0;
 }
 
-.fade-transform-enter-active, .fade-transform-leave-active {
+.fade-transform-enter-active,
+.fade-transform-leave-active {
   transition: all 0.4s ease;
 }
 
@@ -516,34 +548,33 @@ html, body {
   transform: translateX(-20px);
 }
 
-
-
 /* 响应式设计 */
 @media (max-width: 768px) {
   .sidebar {
     width: 70px;
   }
-  
-  .logo-container h1, .el-menu-item > span {
+
+  .logo-container h1,
+  .el-menu-item > span {
     display: none;
   }
-  
+
   .logo-icon {
     width: 40px;
     height: 40px;
     margin-bottom: 0;
   }
-  
+
   .el-menu-item {
     height: 60px;
     margin: 6px 4px;
   }
-  
+
   .el-menu-item .el-icon {
     margin-bottom: 0;
     font-size: 20px;
   }
-  
+
   .page-content {
     padding: 16px;
   }

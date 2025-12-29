@@ -13,11 +13,13 @@
 
 from flask import Flask, jsonify
 from flask_cors import CORS
-import traceback, sys, logging
+import traceback
+import sys
+import logging
 import os
 
 # 设置环境变量以支持中文（部分底层库读取该变量）
-os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'
+os.environ["NLS_LANG"] = "SIMPLIFIED CHINESE_CHINA.UTF8"
 
 # 路由蓝图（模块内包含各自的业务端点）
 from routes.prediction_routes import prediction_bp
@@ -27,7 +29,7 @@ from routes.training_routes import training_bp
 
 app = Flask(__name__)
 # 确保 JSON 响应能够正确处理中文
-app.config['JSON_AS_ASCII'] = False
+app.config["JSON_AS_ASCII"] = False
 # 允许跨域访问（开发阶段常用，生产环境可按域配置）
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -44,22 +46,26 @@ app.logger.setLevel(logging.DEBUG)
 # 启动自动采集调度器（若已安装 APScheduler）
 try:
     from services.collector import DataCollector
+
     DataCollector.instance().start()
 except Exception as _:
-    print('[WARN] 自动采集调度器未启动（可能未安装 APScheduler），不影响主功能')
+    print("[WARN] 自动采集调度器未启动（可能未安装 APScheduler），不影响主功能")
+
 
 @app.errorhandler(Exception)
 def handle_exception(e):
     """全局异常捕获，避免未处理异常导致服务器崩溃。"""
     print("🔥 捕获到全局异常：", str(e))
     traceback.print_exc(file=sys.stdout)
-    return jsonify({'status': 'error', 'message': f'服务器内部错误: {str(e)}'}), 500
+    return jsonify({"status": "error", "message": f"服务器内部错误: {str(e)}"}), 500
 
-@app.route('/')
+
+@app.route("/")
 def home():
     """健康检查/欢迎页。"""
     return "🎯 学生成绩预测系统后端已启动"
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     # Windows/开发环境下默认 5000 端口；生产环境建议使用 WSGI（如 gunicorn+nginx）
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host="0.0.0.0", port=5000)

@@ -15,13 +15,18 @@
 try:
     import mysql.connector
     from mysql.connector import Error
+
     HAS_MYSQL = True
-except Exception as e:
+except Exception:
     HAS_MYSQL = False
     mysql = None
+
     class Error(Exception):
         pass
-    print("[WARN] mysql-connector-python 未安装或导入失败，将以降级模式运行（优先使用 CSV 数据）。")
+
+    print(
+        "[WARN] mysql-connector-python 未安装或导入失败，将以降级模式运行（优先使用 CSV 数据）。"
+    )
     print("       建议安装: pip install mysql-connector-python")
 import os
 from pathlib import Path
@@ -29,8 +34,9 @@ from pathlib import Path
 # 尝试加载环境变量（如果安装了 python-dotenv）
 try:
     from dotenv import load_dotenv
+
     # 获取当前文件所在目录（flask_backend）
-    env_path = Path(__file__).parent / '.env'
+    env_path = Path(__file__).parent / ".env"
     if env_path.exists():
         load_dotenv(dotenv_path=env_path, override=True)
         # 避免在部分 Windows 终端（GBK 编码）下因特殊符号导致编码错误
@@ -39,7 +45,7 @@ try:
         print(f"[WARN] .env 文件不存在于 {env_path}")
         print("  请创建 .env 文件并配置数据库连接信息")
         # 尝试从项目根目录加载
-        root_env_path = Path(__file__).parent.parent / '.env'
+        root_env_path = Path(__file__).parent.parent / ".env"
         if root_env_path.exists():
             load_dotenv(dotenv_path=root_env_path, override=True)
             print(f"[OK] 已从项目根目录加载环境变量文件: {root_env_path}")
@@ -55,15 +61,17 @@ def get_connection():
     优先从环境变量读取：DB_HOST, DB_USER, DB_PASSWORD, DB_NAME。
     注意：不要将生产密码写入代码；当前默认值仅用于开发便捷。
     """
-    host = os.getenv('DB_HOST', 'localhost')
-    user = os.getenv('DB_USER', 'root')
+    host = os.getenv("DB_HOST", "localhost")
+    user = os.getenv("DB_USER", "root")
     # 警告：默认密码仅用于开发，请通过 .env 配置真实密码
-    password = os.getenv('DB_PASSWORD', 'Wh800817')
-    database = os.getenv('DB_NAME', 'student_grades')
+    password = os.getenv("DB_PASSWORD", "Wh800817")
+    database = os.getenv("DB_NAME", "student_grades")
 
     # 调试信息（仅在环境变量 FLASK_DEBUG 为 true 时输出）
-    if os.getenv('FLASK_DEBUG', '').lower() == 'true':
-        print(f"数据库连接配置: host={host}, user={user}, database={database}, password={'*' * len(password) if password else '(空)'}")
+    if os.getenv("FLASK_DEBUG", "").lower() == "true":
+        print(
+            f"数据库连接配置: host={host}, user={user}, database={database}, password={'*' * len(password) if password else '(空)'}"
+        )
 
     try:
         if not HAS_MYSQL:
@@ -76,9 +84,9 @@ def get_connection():
             user=user,
             password=password,
             database=database,
-            charset='utf8mb4',
+            charset="utf8mb4",
             use_unicode=True,
-            collation='utf8mb4_unicode_ci'
+            collation="utf8mb4_unicode_ci",
         )
     except Error as e:
         # 提供更友好的错误信息
@@ -181,7 +189,7 @@ def get_columns(table_name: str):
             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
             ORDER BY ORDINAL_POSITION
             """,
-            (table_name,)
+            (table_name,),
         )
         cols = [row[0] for row in cur.fetchall()]
         return cols

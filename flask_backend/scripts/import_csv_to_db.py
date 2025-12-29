@@ -5,17 +5,17 @@ from datetime import datetime
 
 # Ensure we can import database.py from flask_backend
 CURRENT_DIR = os.path.dirname(__file__)
-BACKEND_DIR = os.path.abspath(os.path.join(CURRENT_DIR, '..'))
+BACKEND_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 from database import get_connection
 
-ROOT_DIR = os.path.abspath(os.path.join(BACKEND_DIR, '..'))
-DATA_DIR = os.path.join(ROOT_DIR, 'database_datasets')
+ROOT_DIR = os.path.abspath(os.path.join(BACKEND_DIR, ".."))
+DATA_DIR = os.path.join(ROOT_DIR, "database_datasets")
 
-STUDENTS_CSV = os.path.join(DATA_DIR, 'students.csv')
-GRADES_CSV = os.path.join(DATA_DIR, 'university_grades.csv')
+STUDENTS_CSV = os.path.join(DATA_DIR, "students.csv")
+GRADES_CSV = os.path.join(DATA_DIR, "university_grades.csv")
 
 
 def create_tables():
@@ -72,10 +72,11 @@ def create_tables():
                     existing_cols.add(name)
                 except Exception:
                     pass
-        ensure_column('first_calculus_score', 'first_calculus_score FLOAT NULL')
-        ensure_column('second_calculus_score', 'second_calculus_score FLOAT NULL')
-        ensure_column('third_calculus_score', 'third_calculus_score FLOAT NULL')
-        ensure_column('calculus_avg_score', 'calculus_avg_score FLOAT NULL')
+
+        ensure_column("first_calculus_score", "first_calculus_score FLOAT NULL")
+        ensure_column("second_calculus_score", "second_calculus_score FLOAT NULL")
+        ensure_column("third_calculus_score", "third_calculus_score FLOAT NULL")
+        ensure_column("calculus_avg_score", "calculus_avg_score FLOAT NULL")
         conn.commit()
     finally:
         cur.close()
@@ -101,21 +102,23 @@ def import_students():
     cur = conn.cursor()
     inserted = 0
     try:
-        with open(STUDENTS_CSV, 'r', encoding='utf-8') as f:
+        with open(STUDENTS_CSV, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             rows = []
             for r in reader:
-                rows.append((
-                    int(r.get('student_id') or 0),
-                    r.get('student_no') or '',
-                    r.get('name') or '',
-                    r.get('gender') or '',
-                    r.get('grade') or '',
-                    r.get('class') or '',
-                    _parse_date(r.get('birth_date') or ''),
-                    r.get('contact_phone') or '',
-                    r.get('email') or ''
-                ))
+                rows.append(
+                    (
+                        int(r.get("student_id") or 0),
+                        r.get("student_no") or "",
+                        r.get("name") or "",
+                        r.get("gender") or "",
+                        r.get("grade") or "",
+                        r.get("class") or "",
+                        _parse_date(r.get("birth_date") or ""),
+                        r.get("contact_phone") or "",
+                        r.get("email") or "",
+                    )
+                )
         if rows:
             cur.executemany(
                 """
@@ -133,7 +136,7 @@ def import_students():
                   contact_phone=VALUES(contact_phone),
                   email=VALUES(email)
                 """,
-                rows
+                rows,
             )
             conn.commit()
             inserted = cur.rowcount
@@ -147,7 +150,7 @@ def _to_float(s):
     if s is None:
         return None
     sv = str(s).strip()
-    if sv == '':
+    if sv == "":
         return None
     try:
         return float(sv)
@@ -159,7 +162,7 @@ def _to_int(s):
     if s is None:
         return None
     sv = str(s).strip()
-    if sv == '':
+    if sv == "":
         return None
     try:
         return int(float(sv))
@@ -182,17 +185,20 @@ def import_university_grades():
         except Exception:
             existing_cols = set()
 
-        with open(GRADES_CSV, 'r', encoding='utf-8') as f:
+        with open(GRADES_CSV, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             rows = []
             row_dicts = []
             for r in reader:
                 # Detect new vs old schema
-                if 'first_calculus_score' in reader.fieldnames or 'calculus_avg_score' in reader.fieldnames:
-                    first = _to_float(r.get('first_calculus_score'))
-                    second = _to_float(r.get('second_calculus_score'))
-                    third = _to_float(r.get('third_calculus_score'))
-                    avg = _to_float(r.get('calculus_avg_score'))
+                if (
+                    "first_calculus_score" in reader.fieldnames
+                    or "calculus_avg_score" in reader.fieldnames
+                ):
+                    first = _to_float(r.get("first_calculus_score"))
+                    second = _to_float(r.get("second_calculus_score"))
+                    third = _to_float(r.get("third_calculus_score"))
+                    avg = _to_float(r.get("calculus_avg_score"))
                     # Compute avg if missing
                     attempts = [x for x in [first, second, third] if x is not None]
                     if avg is None and attempts:
@@ -202,43 +208,59 @@ def import_university_grades():
                     total_compat = avg
                 else:
                     # Old schema
-                    calc_compat = _to_float(r.get('calculus_score'))
-                    total_compat = _to_float(r.get('total_score'))
+                    calc_compat = _to_float(r.get("calculus_score"))
+                    total_compat = _to_float(r.get("total_score"))
                     # Map to new fields: first = old calculus; avg = old total or first
                     first = calc_compat
                     second = None
                     third = None
                     avg = total_compat if total_compat is not None else calc_compat
-                row_dicts.append({
-                    'student_id': _to_int(r.get('student_id')),
-                    'student_no': r.get('student_no') or '',
-                    'first_calculus_score': first,
-                    'second_calculus_score': second,
-                    'third_calculus_score': third,
-                    'calculus_avg_score': avg,
-                    'study_hours': _to_float(r.get('study_hours')),
-                    'attendance_count': _to_int(r.get('attendance_count')),
-                    'homework_score': _to_float(r.get('homework_score')),
-                    'practice_count': _to_int(r.get('practice_count')),
-                    # compat
-                    'calculus_score': calc_compat,
-                    'total_score': total_compat,
-                })
+                row_dicts.append(
+                    {
+                        "student_id": _to_int(r.get("student_id")),
+                        "student_no": r.get("student_no") or "",
+                        "first_calculus_score": first,
+                        "second_calculus_score": second,
+                        "third_calculus_score": third,
+                        "calculus_avg_score": avg,
+                        "study_hours": _to_float(r.get("study_hours")),
+                        "attendance_count": _to_int(r.get("attendance_count")),
+                        "homework_score": _to_float(r.get("homework_score")),
+                        "practice_count": _to_int(r.get("practice_count")),
+                        # compat
+                        "calculus_score": calc_compat,
+                        "total_score": total_compat,
+                    }
+                )
 
         if row_dicts:
             # Determine insertable columns: always require student_id, student_no
             desired_cols = [
-                'student_id', 'student_no',
-                'first_calculus_score', 'second_calculus_score', 'third_calculus_score', 'calculus_avg_score',
-                'study_hours', 'attendance_count', 'homework_score', 'practice_count',
-                'calculus_score', 'total_score'
+                "student_id",
+                "student_no",
+                "first_calculus_score",
+                "second_calculus_score",
+                "third_calculus_score",
+                "calculus_avg_score",
+                "study_hours",
+                "attendance_count",
+                "homework_score",
+                "practice_count",
+                "calculus_score",
+                "total_score",
             ]
-            insert_cols = [c for c in desired_cols if (c in existing_cols or c in ('student_id','student_no'))]
+            insert_cols = [
+                c
+                for c in desired_cols
+                if (c in existing_cols or c in ("student_id", "student_no"))
+            ]
             # Build SQL dynamically
             cols_sql = ", ".join(insert_cols)
             placeholders = ", ".join(["%s"] * len(insert_cols))
-            update_cols = [c for c in insert_cols if c not in ('student_id',)]
-            update_sql = ",\n                  ".join([f"{c}=VALUES({c})" for c in update_cols])
+            update_cols = [c for c in insert_cols if c not in ("student_id",)]
+            update_sql = ",\n                  ".join(
+                [f"{c}=VALUES({c})" for c in update_cols]
+            )
             sql = f"""
                 INSERT INTO university_grades
                   ({cols_sql})
@@ -261,15 +283,15 @@ def import_university_grades():
 
 
 def main():
-    print('[*] Creating tables if not exist...')
+    print("[*] Creating tables if not exist...")
     create_tables()
-    print('[*] Importing students.csv ...')
+    print("[*] Importing students.csv ...")
     n1 = import_students()
-    print(f'[OK] students imported/updated rows: {n1}')
-    print('[*] Importing university_grades.csv ...')
+    print(f"[OK] students imported/updated rows: {n1}")
+    print("[*] Importing university_grades.csv ...")
     n2 = import_university_grades()
-    print(f'[OK] university_grades imported/updated rows: {n2}')
+    print(f"[OK] university_grades imported/updated rows: {n2}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

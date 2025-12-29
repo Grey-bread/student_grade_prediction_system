@@ -17,7 +17,10 @@ import numpy as np
 from sklearn.preprocessing import LabelEncoder
 from pandas.api.types import is_datetime64_any_dtype
 
-def preprocess_df(df: pd.DataFrame, missing_strategy: str = 'mean', outlier_strategy: str = 'iqr'):
+
+def preprocess_df(
+    df: pd.DataFrame, missing_strategy: str = "mean", outlier_strategy: str = "iqr"
+):
     """对输入数据进行通用预处理。
 
     参数：
@@ -41,24 +44,28 @@ def preprocess_df(df: pd.DataFrame, missing_strategy: str = 'mean', outlier_stra
     for c in dt_cols:
         try:
             # 转换为天为单位的浮点数（NaT -> NaN）
-            base = pd.Timestamp('1970-01-01')
-            df[c] = ((df[c] - base) / pd.Timedelta(days=1)).astype('float64')
+            base = pd.Timestamp("1970-01-01")
+            df[c] = ((df[c] - base) / pd.Timedelta(days=1)).astype("float64")
         except Exception:
             # 若异常，回退为字符串再做标签编码阶段处理
             df[c] = df[c].astype(str)
 
     # 1.2 统一数值列类型为 float64
-    numeric_cols = df.select_dtypes(include=['int64','float64']).columns.tolist()
-    df[numeric_cols] = df[numeric_cols].astype('float64')
+    numeric_cols = df.select_dtypes(include=["int64", "float64"]).columns.tolist()
+    df[numeric_cols] = df[numeric_cols].astype("float64")
     # 将时间列纳入数值列集合，方便后续缺失/异常处理
     for c in dt_cols:
-        if c not in numeric_cols and c in df.columns and df[c].dtype.kind in ('i', 'u', 'f'):
+        if (
+            c not in numeric_cols
+            and c in df.columns
+            and df[c].dtype.kind in ("i", "u", "f")
+        ):
             numeric_cols = list(numeric_cols) + [c]
 
     # -------- 2) 缺失值填充 --------
     for col in df.columns:
         if col in numeric_cols:
-            if missing_strategy == 'median':
+            if missing_strategy == "median":
                 df[col] = df[col].fillna(df[col].median())
             else:  # default mean
                 df[col] = df[col].fillna(df[col].mean())
@@ -67,15 +74,15 @@ def preprocess_df(df: pd.DataFrame, missing_strategy: str = 'mean', outlier_stra
             if not mode_vals.empty:
                 df[col] = df[col].fillna(mode_vals.iloc[0])
             else:
-                df[col] = df[col].fillna('')
+                df[col] = df[col].fillna("")
 
     # -------- 3) 异常值处理 --------
     for c in numeric_cols:
         col_series = df[c]
         if col_series.notna().sum() < 3:
-            continue   # 数据太少跳过
+            continue  # 数据太少跳过
 
-        if outlier_strategy == 'iqr':
+        if outlier_strategy == "iqr":
             q1, q3 = col_series.quantile([0.25, 0.75])
             iqr = q3 - q1
             lower = q1 - 1.5 * iqr
@@ -92,7 +99,7 @@ def preprocess_df(df: pd.DataFrame, missing_strategy: str = 'mean', outlier_stra
 
     # -------- 4) 字符串编码 --------
     encoders = {}
-    obj_cols = df.select_dtypes(include=['object']).columns
+    obj_cols = df.select_dtypes(include=["object"]).columns
     for c in obj_cols:
         le = LabelEncoder()
         try:
