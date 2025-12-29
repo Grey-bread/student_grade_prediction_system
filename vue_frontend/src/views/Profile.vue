@@ -207,7 +207,7 @@ import axios from "axios";
 import { Plus } from "@element-plus/icons-vue";
 
 export default {
-  name: "Profile",
+  name: "UserProfile",
   components: { Plus },
   data() {
     return {
